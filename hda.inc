@@ -23,6 +23,9 @@ STREAM ends
 ;--- [6:4]: bits per sample: 0=8, 1=16, 2=20, 3=24, 4=32, 5-7 reserved
 ;--- [3:0]: number of channels: 0=1, 1=2, ... 15=16
 
+;--- gctl: [0] CRST: writing 0 -> controller resets
+;---                 writing 1 -> exit reset
+
 ;--- structure of HDA controller memory-mapped registers
 
 HDAREGS struct 8
@@ -97,6 +100,8 @@ BDLENTRY ends
 
 ;--- CORB: buffer must start on a 128-byte boundary, size in CORBSIZE
 ;--- each entry is 32-bits
+;--- corb read pointer (CORBRP): write 1 to [15] to reset this pointer to 0
+;--- if reset is complete, [15] will be 1.
 ;--- RIRB: buffer must start on a 128-byte boundary, size in RIRBSIZE
 ;--- each entry is 64-bits: response, response_ex (0-3: codec, 4: 1=unsolicited response)
 

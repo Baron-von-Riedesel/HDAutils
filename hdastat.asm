@@ -6,6 +6,8 @@
 	option casemap:none
 	option proc:private
 
+?LOGCODEC equ 0
+
 lf	equ 10
 
 CStr macro text:vararg	;define a string in .code
@@ -38,6 +40,8 @@ endm
 	.data
 
 rmstack dd ?	;real-mode stack ( PCI int 1Ah wants 1 kB stack space )
+pCorb   dd ?	;linear address CORB
+pRirb   dd ?	;linear address RIRB
 bVerbose db 0
 bReset db 0
 bActiveOnly db 0
@@ -138,13 +142,11 @@ nextloop:
 	ret
 dowait endp
 
-;--- send command to codec, using immediate registers
-;--- out: eax = response
+;--- send command to codec, using CORB and RIRB
 
-sendcmd proc codec:dword, node:word, command:word, param:word
-	mov cx,[ebx].HDAREGS.ics
-	or cl,ICS_IRV				;clear "Immediate Result valid"
-	mov [ebx].HDAREGS.ics,cx
+sendcmd proc uses ebx esi pHDA:ptr, codec:dword, node:word, command:word, param:word
+
+	mov ebx, pHDA
 	mov eax,codec
 	shl eax,28
 	movzx ecx,node
@@ -153,30 +155,41 @@ sendcmd proc codec:dword, node:word, command:word, param:word
 	movzx ecx,command
 	movzx edx,param
 	.if ch
-		shl ecx,8
+		shl ecx,8			;some commands have a payload of 16 bits!
 	.else
-		shl ecx,16			;some commands have a payload of 16 bits!
+		shl ecx,16
 	.endif
 	or eax, ecx
 	or eax, edx
-	.while [ebx].HDAREGS.ics & ICS_ICB	;wait till "Immediate Command Busy" is clear
-		call dowait
-	.endw
-	mov [ebx].HDAREGS.ic, eax
+ if ?LOGCODEC
+	push eax
+ endif
+	mov si,[ebx].HDAREGS.rirbwp
 
-;	or [ebx].HDAREGS.ics,ICS_ICB	;no need to set ICS_ICB?
+	mov ecx, pCorb
+	movzx edx,[ebx].HDAREGS.corbwp
+	inc dl
+	mov [ecx+edx*4], eax
+	mov [ebx].HDAREGS.corbwp, dx
 
-	mov ecx,20000h
-	.while !([ebx].HDAREGS.ics & ICS_IRV)	;wait for response
+	mov ecx,80000h
+	.while si == [ebx].HDAREGS.rirbwp
 		call dowait
 		dec ecx
-		jecxz timeout
+		stc
+		jecxz exit
 	.endw
-	mov eax,[ebx].HDAREGS.ir
-	clc
-	ret
-timeout:
-	stc
+	mov ecx,pRirb
+	movzx edx,[ebx].HDAREGS.rirbwp
+	mov eax,[ecx+edx*8]
+ if ?LOGCODEC
+	pop ecx 
+	push eax
+	invoke printf, CStr("sendcmd: sent %X, received %X",lf), ecx, eax
+	pop eax
+ endif
+ 	clc
+exit:
 	ret
 sendcmd endp
 
@@ -236,6 +249,21 @@ translateformat proc
 bittab db 8,16,20,24,32,-1,-1,-1
 translateformat endp
 
+;--- map physical memory block into linear memory
+
+mapphys proc uses ebx esi edi dwPhysBase:dword, dwSize:dword
+	mov cx,word ptr dwPhysBase+0
+	mov bx,word ptr dwPhysBase+2
+	mov di,word ptr dwSize+0
+	mov si,word ptr dwSize+2
+	mov ax,0800h
+	int 31h
+	push bx
+	push cx
+	pop eax
+	ret
+mapphys endp
+
 ;--- display codec, nodes and widgets
 
 dispcodec proc uses ebx esi edi pHDA:ptr HDAREGS, codec:dword
@@ -246,20 +274,132 @@ local wflags:word
 local startnode:dword
 local numnodes:dword
 local cConn:dword
+local dwXMSPhys:dword
+local pXMSLin:dword
+local xmshdl:word
+local rmcs:RMCS
 
 	mov afgnode,0
+	mov xmshdl,0
+
+;--- find XMM entry point.
+;--- using XMS memory, since physical addresses are needed.
+;--- with HDPMI, one could use VDS, but this won't work generally.
+
+	lea edi,rmcs
+	xor eax,eax
+	mov rmcs.rAX,4300h
+	mov rmcs.rFlags,3202h
+	mov rmcs.rSSSP,0
+	mov bx,2fh
+	mov cx,0
+	mov ax,0300h
+	int 31h
+	mov eax,rmcs.rEAX
+	.if al != 80h
+		invoke printf, CStr("no XMM found",lf)
+		jmp exit
+	.endif
+	mov rmcs.rAX,4310h
+	mov ax,0300h
+	int 31h
+
+;--- copy XMS entry point to rmcs.CS:IP
+
+	mov ax,rmcs.rES
+	mov bx,rmcs.rBX
+	mov rmcs.rCS,ax
+	mov rmcs.rIP,bx
+
+;--- allocate (& lock) XMS memory
+;--- the block is for CORB & RIRB (1024+2048
+
+	mov rmcs.rAX,8900h
+	mov rmcs.rEDX,3
+	mov bx,0
+	mov ax,0301h
+	int 31h
+	.if rmcs.rAX != 1
+		invoke printf, CStr("XMS memory allocation failed",lf)
+		jmp exit
+	.endif
+	mov ax,rmcs.rDX
+	mov xmshdl,ax
+	mov rmcs.rAX,0C00h
+	mov bx,0
+	mov ax,0301h
+	int 31h
+	.if rmcs.rAX != 1
+		invoke printf, CStr("XMS memory lock failed",lf)
+		jmp exit
+	.endif
+	mov ax,rmcs.rDX
+	shl eax,16
+	mov ax,rmcs.rBX
+	mov dwXMSPhys,eax
+	invoke printf, CStr(lf,"EMB physical address=%X, used for CORB & RIRB",lf), eax
+
+;--- map the block into linear memory so it can be accessed
+
+	invoke mapphys, dwXMSPhys, 1024 * 3
+	jc exit
+	mov pXMSLin, eax
 
 	mov ebx, pHDA
 
+;--- init CORB & RIRB ring buffers
+
+	mov edi, dwXMSPhys
+	mov eax, pXMSLin
+	mov dword ptr [ebx].HDAREGS.corbbase+0, edi
+	mov dword ptr [ebx].HDAREGS.corbbase+4, 0
+	mov pCorb, eax
+	mov ecx, 256*4
+	add eax, ecx
+	add edi, ecx
+	mov dword ptr [ebx].HDAREGS.rirbbase+0, edi
+	mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
+	mov pRirb, eax
+
+;--- reset CORB, RIRB
+
+	and [ebx].HDAREGS.corbctl,not 2
+	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
+
+;--- to reset the CORB RP, first set bit 15 to 1, then back to 0.
+;--- this often doesn't work.
+
+	or byte ptr [ebx].HDAREGS.corbrp+1,80h	;reset CORB RP
+	mov ecx,10000h
+@@:
+	call dowait
+	test byte ptr [ebx].HDAREGS.corbrp+1,80h
+	loopz @B
+	and byte ptr [ebx].HDAREGS.corbrp+1,7fh
+	mov ecx,80000h
+@@:
+	call dowait
+	test byte ptr [ebx].HDAREGS.corbrp+1,80h
+	loopnz @B
+
+	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
+	mov [ebx].HDAREGS.rirbric,1		;interrupt after 1 response
+
+;--- start DMA engines for CORB and RIRB
+
+	or [ebx].HDAREGS.corbctl,2
+	or [ebx].HDAREGS.rirbctl,2
+
+
 	invoke printf, CStr(lf,"codec/node/cmd/param: value",lf)
 	invoke printf, CStr("-----------------------------------------------",lf)
-	invoke sendcmd, codec, 0, 0F00h, 0
+	invoke sendcmd, ebx, codec, 0, 0F00h, 0
 	jc timeout
 	shld edx,eax,16
 	movzx edx,dx
 	movzx eax,ax
 	invoke printf, CStr("%2u/  0/0F00/0  - vendor/device: 0x%X/0x%X",lf), codec, edx, eax
-	invoke sendcmd, codec, 0, 0F00h, 4
+	invoke sendcmd, ebx, codec, 0, 0F00h, 4
 	movzx ecx, al
 	mov edi, ecx
 	shld edx, eax,16
@@ -268,7 +408,7 @@ local cConn:dword
 	invoke printf, CStr("%2u/  0/0F00/4  - node count: 0x%X (start node=%u, no of nodes=%u)",lf), codec, eax, edx, ecx
 	;--- display the type of the function group nodes
 	.while edi
-		invoke sendcmd, codec, si, 0F00h, 5
+		invoke sendcmd, ebx, codec, si, 0F00h, 5
 		movzx ecx,al
 		and cl,7Fh
 		.if cl == 1
@@ -282,9 +422,9 @@ local cConn:dword
 	jz exit
 
 ;--- if a AFG has been found, display its pcm rates
-	invoke sendcmd, codec, afgnode, 0F00h, 10
+	invoke sendcmd, ebx, codec, afgnode, 0F00h, 10
 	invoke printf, CStr("%2u/%3u/0F00/10 - supported PCM rates: 0x%X",lf), codec, afgnode, eax
-	invoke sendcmd, codec, afgnode, 0F00h, 4
+	invoke sendcmd, ebx, codec, afgnode, 0F00h, 4
 	movzx ecx, al
 	mov edi, ecx
 	shld edx, eax,16
@@ -294,7 +434,7 @@ local cConn:dword
 	mov numnodes, edi
 	invoke printf, CStr("%2u/%3u/0F00/4  - node count: 0x%X (start node=%u, no of nodes=%u)",lf), codec, afgnode, eax, edx, ecx
 	.while edi
-		invoke sendcmd, codec, si, 0F00h, 9
+		invoke sendcmd, ebx, codec, si, 0F00h, 9
 		mov ecx, eax
 		shr ecx,20
 		and ecx,0Fh
@@ -337,16 +477,16 @@ endif
 			mov btype, al
 		.endif
 
-		invoke sendcmd, codec, si, 0F00h, 9
+		invoke sendcmd, ebx, codec, si, 0F00h, 9
 		mov wflags, ax
 		invoke printf, CStr("%2u/%3u/0F00/9  - widget cap.: 0x%X",lf), codec, esi, eax
 
 		.if btype == 0 || btype == 1
-			invoke sendcmd, codec, si, 0F00h, 10
+			invoke sendcmd, ebx, codec, si, 0F00h, 10
 			invoke printf, CStr("%2u/%3u/0F00/10 - supported PCM rates: 0x%X",lf), codec, si, eax
 		.endif
 		.if btype == 4
-			invoke sendcmd, codec, si, 0F00h, 12
+			invoke sendcmd, ebx, codec, si, 0F00h, 12
 			bt eax,2
 			setc cl
 			movzx ecx,cl
@@ -356,20 +496,20 @@ endif
 			invoke printf, CStr("%2u/%3u/0F00/12 - PIN capabilities: 0x%X (presence detect cap.=%u, output cap.=%u)",lf), codec, si, eax, ecx, edx
 		.endif
 		.if btype == 2 || btype == 4
-			invoke sendcmd, codec, si, 0F00h, 18
+			invoke sendcmd, ebx, codec, si, 0F00h, 18
 			invoke printf, CStr("%2u/%3u/0F00/18 - output amplifier details: 0x%X",lf), codec, si, eax
-			invoke sendcmd, codec, si, 0F00h, 13
+			invoke sendcmd, ebx, codec, si, 0F00h, 13
 			invoke printf, CStr("%2u/%3u/0F00/13 - volume knob caps: 0x%X",lf), codec, si, eax
 		.endif
 		.if wflags & 100h
-			invoke sendcmd, codec, si, 0F00h, 14
+			invoke sendcmd, ebx, codec, si, 0F00h, 14
 			mov cConn, eax
 			invoke printf, CStr("%2u/%3u/0F00/14 - connection list length: %u",lf), codec, si, eax
 			push edi
 			xor edi, edi
 			invoke printf, CStr("%2u/%3u/0F02/%02u - get entries in connection list:"), codec, si, di
 			.while edi < cConn
-				invoke sendcmd, codec, si, 0F02h, di
+				invoke sendcmd, ebx, codec, si, 0F02h, di
 				push ebx
 				shld edx, eax,24
 				shld ecx, eax,16
@@ -386,29 +526,29 @@ endif
 			pop edi
 		.endif
 		.if btype == 0 || btype == 1
-			invoke sendcmd, codec, si, 0F03h, 0
+			invoke sendcmd, ebx, codec, si, 0F03h, 0
 			invoke printf, CStr("%2u/%3u/0F03/0  - processing state: 0x%X",lf), codec, si, eax
-			invoke sendcmd, codec, si, 0F06h, 0
+			invoke sendcmd, ebx, codec, si, 0F06h, 0
 			shld ecx,eax,28
 			shld edx,eax,32
 			and ecx,0fh
 			and edx,0fh
 			invoke printf, CStr("%2u/%3u/0F06/0  - link stream/channel: 0x%X (stream=%u, channel=%u)",lf), codec, si, eax, ecx, edx
-			invoke sendcmd, codec, si, 00Ah, 0
+			invoke sendcmd, ebx, codec, si, 00Ah, 0
 			push ebx
 			call translateformat
 			invoke printf, CStr("%2u/%3u/000A/0  - converter format: 0x%X (rate=%u, bits=%u, channels=%u)",lf), codec, si, eax, ecx, edx, ebx
 			pop ebx
 			.if btype == 0
-				invoke sendcmd, codec, si, 00Bh, 8000h  ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
+				invoke sendcmd, ebx, codec, si, 00Bh, 8000h  ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
 				invoke printf, CStr("%2u/%3u/000B/8000  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
 			.else
-				invoke sendcmd, codec, si, 00Bh, 0      ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
+				invoke sendcmd, ebx, codec, si, 00Bh, 0      ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
 				invoke printf, CStr("%2u/%3u/000B/0  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
 			.endif
 		.endif
 		.if btype == 4
-			invoke sendcmd, codec, si, 0F07h, 0	;get pin widget control
+			invoke sendcmd, ebx, codec, si, 0F07h, 0	;get pin widget control
 			bt ax,7
 			.if CARRY?
 				mov ecx, CStr("HP enable ")
@@ -430,7 +570,7 @@ endif
 			.endif
 			invoke printf, CStr("%2u/%3u/0F07/0  - pin widget control: 0x%X - %s%s%s",lf), codec, si, eax, ecx, edx, ebx
 			pop ebx
-			invoke sendcmd, codec, si, 0F1Ch, 0
+			invoke sendcmd, ebx, codec, si, 0F1Ch, 0
 			push eax
 			invoke printf, CStr("%2u/%3u/0F1C/0  - configuration default: 0x%X",lf), codec, si, eax
 			pop eax
@@ -470,10 +610,33 @@ endif
 	.endw
 	mov esp, esi
 exit:
+	mov ebx, pHDA
+
+;--- stop CORB and RIRB DMA engines
+
+	and [ebx].HDAREGS.corbctl,not 2
+	and [ebx].HDAREGS.rirbctl,not 2
+
+	mov ax,xmshdl
+	.if ax
+		mov rmcs.rDX,ax
+		mov rmcs.rAX,0D00h	;unlock XMS block
+		lea edi,rmcs
+		mov bx,0
+		mov cx,0
+		mov ax,0301h
+		int 31h
+		mov rmcs.rAX,0A00h	;free XMS block
+		mov bx,0
+		mov cx,0
+		mov ax,0301h
+		int 31h
+	.endif
 	ret
 timeout:
 	invoke printf, CStr(lf,"timeout waiting for codec response",lf)
-	ret
+	jmp exit
+
 dispcodec endp
 
 ;--- display HDA controller's memory-mapped registers
@@ -748,7 +911,7 @@ finddevice proc uses ebx esi edi dwClass:dword, pszType:ptr, bSilent:byte
 		shr ecx,3
 		movzx edx,bl
 		and dl,7
-		invoke printf, CStr("%s device (class=0x%06X) found at bus/device/function=%u/%u/%u:",lf),pszType,dwClass,eax,ecx,edx
+		invoke printf, CStr(lf,"%s device (class=0x%06X) found at bus/device/function=%u/%u/%u:",lf),pszType,dwClass,eax,ecx,edx
 		invoke disppci, dwClass, ebx
 		inc esi
 	.until 0

@@ -177,7 +177,6 @@ searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, codec:dword, wFormat:word
 local startnode:dword
 local numnodes:dword
 local numConn:dword
-local afgnode:word
 local hpnode:word
 local lonode:word
 local lomixernode:word
@@ -185,6 +184,7 @@ local loaonode:word
 
 ;--- get start of root nodes
 
+	mov lonode,0
 	mov ebx, pHDA
 	invoke sendcmd, ebx, codec, 0, 0F00h, 4
 	movzx ecx, al
@@ -204,7 +204,6 @@ local loaonode:word
 	.endw
 	cmp edi,0
 	jz exit
-	mov afgnode, si
 
 ;--- get start of afg widgets
 
@@ -216,7 +215,6 @@ local loaonode:word
 	mov esi, edx
 	mov startnode, esi
 	mov numnodes, edi
-	mov lonode,0
 	mov hpnode,0
 
 ;--- scan afg widgets, searching "lineout" and "headphone" pins
@@ -339,6 +337,7 @@ local loaonode:word
 		invoke sendcmd, ebx, codec, loaonode, 0003h, 0B040h
 	.endif
 exit:
+	movzx eax,lonode
 	ret
 searchaopath endp
 
@@ -794,18 +793,24 @@ endif
 
 ;--- reset CORB, RIRB
 
+	and [ebx].HDAREGS.corbctl,not 2
 	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
 
 ;--- to reset the CORB RP, first set bit 15 to 1, then back to 0
+;--- seems not to work on many machines
 
 	or byte ptr [ebx].HDAREGS.corbrp+1,80h	;reset CORB RP
-	.while !(byte ptr [ebx].HDAREGS.corbrp+1 & 80h)
-		call dowait
-	.endw
+	mov ecx,10000h
+@@:
+	call dowait
+	test byte ptr [ebx].HDAREGS.corbrp+1,80h
+	loopz @B
 	and byte ptr [ebx].HDAREGS.corbrp+1,7fh
-	.while byte ptr [ebx].HDAREGS.corbrp+1 & 80h
-		call dowait
-	.endw
+	mov ecx,10000h
+@@:
+	call dowait
+	test byte ptr [ebx].HDAREGS.corbrp+1,80h
+	loopnz @B
 
 	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
 	mov [ebx].HDAREGS.rirbric,1		;interrupt after 1 response
@@ -831,10 +836,15 @@ endif
 				push ecx
 				invoke searchaopath, ebx, esi, wFormat
 				pop ecx
+				.break .if eax
 			.endif
 			shl ecx,1
 			inc esi
 		.endw
+	.endif
+	.if !eax
+		invoke printf, CStr("no lineout pin found",lf)
+		jmp exit
 	.endif
 
 	or [ebx].HDAREGS.stream4.wCtl, 2	;run DMA engine
