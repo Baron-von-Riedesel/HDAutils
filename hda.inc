@@ -114,3 +114,14 @@ BDLENTRY ends
 ;--- bit 11-8: index (usually 0)
 ;--- bit 7: mute
 ;--- bit 6-0: gain
+;
+;--- default configuration (F1C)
+;--- 31:30 port connectivity
+;--- 29:24 location
+;--- 23:20 default device
+;--- 19:16 connection type
+;--- 15:12 color
+;--- 11:8 misc
+;--- 7:4 def. association
+;--- 3:0 sequence
+

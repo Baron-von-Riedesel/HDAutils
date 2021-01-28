@@ -171,6 +171,8 @@ sendcmd endp
 
 ;--- get "line out" pin widget, get its connections
 ;--- and search the path to corresponding "audio output"
+;--- in case there's no path pin->mixer->dac,
+;--- search the mixer separately
 
 searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, codec:dword, wFormat:word
 
@@ -227,11 +229,18 @@ local loaonode:word
 			invoke sendcmd, ebx, codec, si, 0F1Ch, 0	;get default config
 			shld ecx,eax,12
 			and ecx,0Fh
+			mov edx,eax
+			shr edx,12
+			and edx,0fh
 			.if ecx == 0
 				.if !bQuiet
 					invoke printf, CStr("lineout pin widget: %u",lf), esi
 				.endif
-				mov lonode, si
+				.if lonode == 0
+					mov lonode, si
+				.elseif edx == 4 ;color green?
+					mov lonode, si
+				.endif
 			.elseif ecx == 2
 				.if !bQuiet
 					invoke printf, CStr("headphone pin widget: %u",lf), esi
@@ -243,6 +252,7 @@ local loaonode:word
 		dec edi
 	.endw
 
+;--- without lineout pin, there's nothing to do
 	movzx esi,lonode
 	cmp esi,0
 	jz exit
@@ -252,6 +262,7 @@ local loaonode:word
 
 ;--- get connections of "lineout"
 ;--- currently only first found mixer is used
+;--- todo: check which of the connections is currently selected
 
 	invoke sendcmd, ebx, codec, si, 0F00h, 14	;get connections
 	mov numConn, eax
@@ -285,86 +296,69 @@ local loaonode:word
 		add edi, 4
 	.endw
 
-	movzx esi,lomixernode
-	cmp esi,0
-	jz exit
-
 ;--- get connections of mixer, find the connection to an audio converter
 
-	invoke sendcmd, ebx, codec, si, 0F00h, 14	;get connections
-	mov numConn, eax
-	xor edi, edi
-	.while edi < numConn
-		invoke sendcmd, ebx, codec, si, 0F02h, di	;get connection nodes
-		.while eax
-			push esi
-			push eax
-			movzx esi,al
-			invoke sendcmd, ebx, codec, si, 0F00h, 9
-			shld ecx, eax, 12
-			and ecx,0fh
-			.if ecx == 0 && loaonode == 0
-				mov loaonode, si
-			.endif
-			.if bQuiet
-				;
-			.elseif ecx <= 7
-				mov ecx,[ecx*4 + offset widgettypes]
-				invoke printf, CStr("%u connected to %u (%s)",lf), lomixernode, esi, ecx
-			.else
-				invoke printf, CStr("%u connected to %u (type %u)",lf), lomixernode, esi, ecx
-			.endif
-			pop eax
-			pop esi
-			shr eax,8
+	movzx esi,lomixernode
+	.if esi
+		invoke sendcmd, ebx, codec, si, 0F00h, 14	;get connections
+		mov numConn, eax
+		xor edi, edi
+		.while edi < numConn
+			invoke sendcmd, ebx, codec, si, 0F02h, di	;get connection nodes
+			.while eax
+				push esi
+				push eax
+				movzx esi,al
+				invoke sendcmd, ebx, codec, si, 0F00h, 9
+				shld ecx, eax, 12
+				and ecx,0fh
+				.if ecx == 0 && loaonode == 0
+					mov loaonode, si
+				.endif
+				.if bQuiet
+					;
+				.elseif ecx <= 7
+					mov ecx,[ecx*4 + offset widgettypes]
+					invoke printf, CStr("%u connected to %u (%s)",lf), lomixernode, esi, ecx
+				.else
+					invoke printf, CStr("%u connected to %u (type %u)",lf), lomixernode, esi, ecx
+				.endif
+				pop eax
+				pop esi
+				shr eax,8
+			.endw
+			add edi, 4
 		.endw
-		add edi, 4
-	.endw
+	.elseif loaonode == 0	;no mixer, and no dac (connected directly to pin)?
+		mov lonode,0	;neither mixer nor dac connected to lineout
+		jmp exit
+	.endif
 
 ;--- if an "audio converter" has been found, the path is complete
 
 	.if loaonode
 		.if !bQuiet
-			invoke printf, CStr("path: %u/%u/%u",lf), loaonode, lomixernode, lonode
+			.if lomixernode
+				invoke printf, CStr("path: %u/%u/%u",lf), loaonode, lomixernode, lonode
+			.else
+				invoke printf, CStr("path: %u/%u",lf), loaonode, lonode
+			.endif
 		.endif
 		invoke sendcmd, ebx, codec, loaonode, 0002h, wFormat;set converter format
 		invoke sendcmd, ebx, codec, loaonode, 0706h, 10h	;stream is in [7:4], channel in [3:0]
-		invoke sendcmd, ebx, codec, lonode, 0707h, 0C0h		;set pin widget control (out enable)
+		invoke sendcmd, ebx, codec, lonode, 0707h, 0C4h		;set pin widget control (out enable, 80%)
 		;--- set amplifier gain/mute for pin, mixer and audio converter
-		;--- 0B040h = output, L&R, 50%
-		invoke sendcmd, ebx, codec, lonode, 0003h, 0B040h
-		invoke sendcmd, ebx, codec, lomixernode, 0003h, 0B040h
-		invoke sendcmd, ebx, codec, loaonode, 0003h, 0B040h
+		;--- 0B040h = output, L&R, 50%, 0F040h = output/input, L&R, 50%
+		invoke sendcmd, ebx, codec, lonode, 0003h, 0F040h
+		.if lomixernode
+			invoke sendcmd, ebx, codec, lomixernode, 0003h, 0F040h
+		.endif
+		invoke sendcmd, ebx, codec, loaonode, 0003h, 0B040h	;set output for converters
 	.endif
 exit:
 	movzx eax,lonode
 	ret
 searchaopath endp
-
-;--- display CORB & RIRB registers
-
-dispcr proc
-	invoke printf, CStr("CORB address=0x%lX, WP=%u, RP=%u",lf),
-		[ebx].HDAREGS.corbbase, [ebx].HDAREGS.corbwp,[ebx].HDAREGS.corbrp
-	mov dl,[ebx].HDAREGS.corbctl
-	.if dl & 2
-		mov ecx, CStr("DMA running")
-	.else
-		mov ecx, CStr("DMA stopped")
-	.endif
-	invoke printf, CStr("CORB status=0x%X, control=0x%X - %s",lf), [ebx].HDAREGS.corbsts, dl, ecx
-
-	invoke printf, CStr("RIRB address=0x%lX, WP=%u, RIC=%u",lf),
-		[ebx].HDAREGS.rirbbase, [ebx].HDAREGS.rirbwp,[ebx].HDAREGS.rirbric
-	mov dl,[ebx].HDAREGS.rirbctl
-	.if dl & 2
-		mov ecx, CStr("DMA running")
-	.else
-		mov ecx, CStr("DMA stopped")
-	.endif
-	invoke printf, CStr("RIRB status=0x%X, control=0x%X - %s",lf), [ebx].HDAREGS.rirbsts, dl, ecx
-	ret
-dispcr endp
 
 ;--- translate format in EAX to rate (ecx), bits (edx), channels (ebx)
 
@@ -454,6 +448,33 @@ bitsparam db 0,1 shl 4, 2 shl 4, 3 shl 4, 4 shl 4
 
 rbc2format endp
 
+;--- display CORB & RIRB registers
+
+dispcr proc
+	invoke printf, CStr("CORB address=0x%lX, WP=%u, RP=%u",lf),
+		[ebx].HDAREGS.corbbase, [ebx].HDAREGS.corbwp,[ebx].HDAREGS.corbrp
+	mov dl,[ebx].HDAREGS.corbctl
+	.if dl & 2
+		mov ecx, CStr("DMA running")
+	.else
+		mov ecx, CStr("DMA stopped")
+	.endif
+	invoke printf, CStr("CORB status=0x%X, control=0x%X - %s",lf), [ebx].HDAREGS.corbsts, dl, ecx
+
+	invoke printf, CStr("RIRB address=0x%lX, WP=%u, RIC=%u",lf),
+		[ebx].HDAREGS.rirbbase, [ebx].HDAREGS.rirbwp,[ebx].HDAREGS.rirbric
+	mov dl,[ebx].HDAREGS.rirbctl
+	.if dl & 2
+		mov ecx, CStr("DMA running")
+	.else
+		mov ecx, CStr("DMA stopped")
+	.endif
+	invoke printf, CStr("RIRB status=0x%X, control=0x%X - %s",lf), [ebx].HDAREGS.rirbsts, dl, ecx
+	ret
+dispcr endp
+
+;--- display HDA STREAN registers
+
 dispstream proc uses ebx esi edi pStream:ptr, no:dword
 
 	mov edi,pStream
@@ -497,12 +518,50 @@ nBlockAlign     dw ?
 wBitsPerSample  dw ?
 WAVEFMT ends
 
+;--- get HDA controller's register map
+
+getHDAaddress proc uses ebx esi edi dwPath:dword
+
+local dwPhysBase:dword
+
+	mov edi, 4*4
+	mov ebx,dwPath
+	mov ax,0B10Ah
+	call int_1a
+	jc exit
+	and cl,0F0h
+	mov dwPhysBase, ecx
+	mov edi, 5*4
+	mov ebx,dwPath
+	mov ax,0B10Ah
+	call int_1a
+	jc exit
+	.if ecx
+		mov eax,dwPhysBase
+		invoke printf, CStr("HDA Base Address=0x%lX beyond 4 GB limit, can't be accessed.",lf), ecx::eax
+		jmp exit
+	.endif
+	.if !bQuiet
+		invoke printf, CStr(lf,"HDA Base Address=0x%X",lf), dwPhysBase
+	.endif
+	mov eax, dwPhysBase
+	ret
+exit:
+	xor eax,eax
+	ret
+getHDAaddress endp
 
 ;--- play .wav file directly with HDA
+;--- to store the samples, XMS memory is used,
+;--- because DPMI memory allocation isn't guaranteed to
+;--- be physically contiguous. Also, it's a problem in DPMI to
+;--- get the physical address of a linear address.
 
-playwavewithHDA proc uses ebx esi edi pHDALin:dword, pszFN:ptr
+playwavewithHDA proc uses ebx esi edi pszFN:ptr
 
+local pHDALin:dword
 local hFile:dword
+local currdevice:dword
 local dwXMSPhys1:dword
 local dwXMSPhys2:dword
 local pXMSLin1:dword
@@ -517,12 +576,15 @@ local rmcs:RMCS
 	mov hFile,-1
 	mov xmshdl1,0
 	mov xmshdl2,0
-	mov ax,716Ch
+
+;--- open the .wav file
+
 	mov esi,pszFN
 	mov bx,3040h
 	mov cx,0
 	mov dx,1
 	mov di,0
+	mov ax,716Ch
 	stc
 	int 21h
 	jnc @F
@@ -537,6 +599,9 @@ local rmcs:RMCS
 @@:
 	mov ebx,eax
 	mov hFile,eax
+
+;--- now load the RIFF headers to get the PCM format and size for the samples block
+
 	lea edx,riffhdr
 	mov ecx,sizeof riffhdr
 	mov ax,3F00h
@@ -588,7 +653,6 @@ local rmcs:RMCS
 
 ;--- find XMM entry point.
 ;--- using XMS memory, since physical addresses are needed.
-;--- with HDPMI, one could use VDS, but this won't work generally.
 
 	lea edi,rmcs
 	xor eax,eax
@@ -616,10 +680,10 @@ local rmcs:RMCS
 	mov rmcs.rIP,bx
 
 ;--- allocate (& lock) XMS memory
-;--- first a block for CORB, RIRB & BDL (1024+2048+32)
+;--- first a block for CORB, RIRB & BDL, size 1024+2048+32
 
 	mov rmcs.rAX,8900h
-	mov rmcs.rEDX,4
+	mov rmcs.rEDX,4	;alloc 4 kB
 	mov bx,0
 	mov ax,0301h
 	int 31h
@@ -629,7 +693,7 @@ local rmcs:RMCS
 	.endif
 	mov ax,rmcs.rDX
 	mov xmshdl1,ax
-	mov rmcs.rAX,0C00h
+	mov rmcs.rAX,0C00h	;lock the block
 	mov bx,0
 	mov ax,0301h
 	int 31h
@@ -651,23 +715,6 @@ local rmcs:RMCS
 	jc exit
 	mov pXMSLin1, eax
 
-;--- HDA controller in reset?
-	mov ebx, pHDALin
-	mov eax, [ebx].HDAREGS.gctl
-	test eax,1
-	jnz hda_running
-	or [ebx].HDAREGS.gctl,1
-	mov ecx,80000h
-@@:
-	call dowait
-	test [ebx].HDAREGS.gctl, 1
-	loopz @B
-	.if (!ecx)
-		invoke printf, CStr("timeout starting HDA controller",lf)
-		jmp exit
-	.endif
-hda_running:
-
 ;--- allocate second XMS block for samples
 
 	mov eax,datahdr.subchkSiz
@@ -681,7 +728,7 @@ hda_running:
 	mov ax,0301h
 	int 31h
 	.if rmcs.rAX != 1
-		invoke printf, CStr("XMS memory allocation failed",lf)
+		invoke printf, CStr("can't allocate %u kB XMS memory for samples",lf), rmcs.rEDX
 		jmp exit
 	.endif
 	mov ax,rmcs.rDX
@@ -702,21 +749,47 @@ hda_running:
 		invoke printf, CStr("EMB physical address=%X, used for samples",lf), eax
 	.endif
 
-;--- map memory in address space, read samples, then unmap buffer 
-	invoke mapphys, dwXMSPhys2, datahdr.subchkSiz
-	jc exit
-	mov edx, eax
-	push eax
-	mov ecx, datahdr.subchkSiz
-	mov ebx,hFile
-	mov ax,3F00h
-	int 21h
-	pop cx
-	pop bx
-	mov ax,0801h	;unmap linear region in BX:CX
-	int 31h
+;--- find audio media device(s)
 
-	mov ebx, pHDALin
+	mov currdevice,0
+nextdevice:
+	mov esi,currdevice
+	mov ecx,040300h	;search for HD Audio
+	mov ax,0B103h
+	call int_1a
+	.if ah != 0
+		.if currdevice == 0
+			invoke printf, CStr("no HDA device found",lf)
+		.endif
+		jmp exit
+	.endif
+	invoke getHDAaddress, ebx
+	.if !eax
+		invoke printf, CStr("can't get HDA register map address",lf)
+		jmp exit
+	.endif
+
+	invoke mapphys, eax, 1100h	;1100h is the max size (HDA with 32 streams)
+	jc exit
+	mov pHDALin, eax
+
+;--- HDA controller in reset?
+
+	mov ebx, eax
+	mov eax, [ebx].HDAREGS.gctl
+	test eax,1
+	jnz hda_running
+	or [ebx].HDAREGS.gctl,1
+	mov ecx,80000h
+@@:
+	call dowait
+	test [ebx].HDAREGS.gctl, 1
+	loopz @B
+	.if (!ecx)
+		invoke printf, CStr("timeout starting HDA controller",lf)
+		jmp exit
+	.endif
+hda_running:
 
 ;--- init CORB & RIRB ring buffers
 
@@ -825,7 +898,9 @@ endif
 		call dispcr
 	.endif
 
-;--- scan STATESTS
+;--- scan STATESTS for attached codecs;
+;--- search the codec's lineout pin.
+
 	mov esi,0
 	movzx ecx, [ebx].HDAREGS.statests
 	.if (ecx == 0)
@@ -838,16 +913,37 @@ endif
 				pop ecx
 				.break .if eax
 			.endif
-			shl ecx,1
+			shr ecx,1
 			inc esi
 		.endw
 	.endif
 	.if !eax
-		invoke printf, CStr("no lineout pin found",lf)
-		jmp exit
+		invoke printf, CStr("no lineout pin found for this device",lf)
+		call stopcr
+		inc currdevice
+		jmp nextdevice
 	.endif
 
-	or [ebx].HDAREGS.stream4.wCtl, 2	;run DMA engine
+;--- the HDA is ready to start the DMA process
+;--- map memory for samples in address space, read samples, and unmap buffer 
+
+	invoke mapphys, dwXMSPhys2, datahdr.subchkSiz
+	jc exit
+	mov edx, eax
+	push eax
+	mov ecx, datahdr.subchkSiz
+	mov ebx,hFile
+	mov ax,3F00h
+	int 21h
+	pop cx
+	pop bx
+	mov ax,0801h	;unmap linear region in BX:CX
+	int 31h
+
+;--- run the DMA engine
+
+	mov ebx, pHDALin
+	or [ebx].HDAREGS.stream4.wCtl, 2
 
 	.if !bQuiet
 		invoke dispstream, addr [ebx].HDAREGS.stream4, 4
@@ -874,15 +970,7 @@ else
 endif
 
 	and [ebx].HDAREGS.stream4.wCtl, not 2;stop DMA engine
-
-;--- stop CORB and RIRB DMA engines
-
-	mov al,[ebx].HDAREGS.corbctl
-	and al,not 2
-	mov [ebx].HDAREGS.corbctl,al
-	mov al,[ebx].HDAREGS.rirbctl
-	and al,not 2
-	mov [ebx].HDAREGS.rirbctl,al
+	call stopcr
 
 exit:
 	mov ax,xmshdl2
@@ -924,40 +1012,23 @@ exit:
 	.endif
 	ret
 
+stopcr:
+;--- stop CORB and RIRB DMA engines
+	mov al,[ebx].HDAREGS.corbctl
+	and al,not 2
+	mov [ebx].HDAREGS.corbctl,al
+	mov al,[ebx].HDAREGS.rirbctl
+	and al,not 2
+	mov [ebx].HDAREGS.rirbctl,al
+
+;--- unmap HDA memory map
+	mov ecx,ebx
+	shr ebx,16
+	mov ax,0801h
+	int 31h
+	retn
+
 playwavewithHDA endp
-
-;--- get HDA controller's register map
-
-preparehda proc uses ebx esi edi dwPath:dword
-
-local dwPhysBase:dword
-
-	mov edi, 4*4
-	mov ebx,dwPath
-	mov ax,0B10Ah
-	call int_1a
-	jc exit
-	and cl,0F0h
-	mov dwPhysBase, ecx
-	mov edi, 5*4
-	mov ebx,dwPath
-	mov ax,0B10Ah
-	call int_1a
-	jc exit
-	.if ecx
-		mov eax,dwPhysBase
-		invoke printf, CStr("HDA Base Address=0x%lX beyond 4 GB limit, can't be accessed.",lf), ecx::eax
-		jmp exit
-	.endif
-	.if !bQuiet
-		invoke printf, CStr(lf,"HDA Base Address=0x%X",lf), dwPhysBase
-	.endif
-	mov eax, dwPhysBase
-	ret
-exit:
-	xor eax,eax
-	ret
-preparehda endp
 
 ;--- find a path to lineout and stream a .wav file
 
@@ -1007,21 +1078,7 @@ local pszFN:dword
 	cmp edx," ICP"
 	jnz error1
 
-;--- find audio media device
-
-	xor esi,esi
-	mov ecx,040300h
-	mov ax,0B103h
-	call int_1a
-	.if ah != 0
-		invoke printf, CStr("no HDA device found",lf)
-		jmp exit
-	.endif
-	invoke preparehda, ebx
-	.if eax
-		invoke mapphys, eax, 1100h
-		invoke playwavewithHDA, eax, pszFN
-	.endif
+	invoke playwavewithHDA, pszFN
 exit:
 	ret
 usage:

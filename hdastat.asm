@@ -479,7 +479,8 @@ endif
 
 		invoke sendcmd, ebx, codec, si, 0F00h, 9
 		mov wflags, ax
-		invoke printf, CStr("%2u/%3u/0F00/9  - widget cap.: 0x%X",lf), codec, esi, eax
+		;--- [4]: Amp Param Override [5]: stripe, [9]: digital, [10] Power Ctrl, 
+		invoke printf, CStr("%2u/%3u/0F00/9  - widget cap.: 0x%X ([1]=inp amp, [2]=out amp)",lf), codec, esi, eax
 
 		.if btype == 0 || btype == 1
 			invoke sendcmd, ebx, codec, si, 0F00h, 10
@@ -497,6 +498,7 @@ endif
 		.endif
 		.if btype == 2 || btype == 4
 			invoke sendcmd, ebx, codec, si, 0F00h, 18
+			;--- [31]: mute capable, 22:16 stepsize, 14:8 numsteps, 6:0 offset
 			invoke printf, CStr("%2u/%3u/0F00/18 - output amplifier details: 0x%X",lf), codec, si, eax
 			invoke sendcmd, ebx, codec, si, 0F00h, 13
 			invoke printf, CStr("%2u/%3u/0F00/13 - volume knob caps: 0x%X",lf), codec, si, eax
@@ -523,6 +525,10 @@ endif
 				add edi, 4
 			.endw
 			invoke printf, CStr(lf)
+			.if cConn > 1
+				invoke sendcmd, ebx, codec, si, 0F01h, 0
+				invoke printf, CStr("%2u/%3u/0F01/0  - currently selected connection: %u",lf), codec, si, eax
+			.endif
 			pop edi
 		.endif
 		.if btype == 0 || btype == 1
@@ -530,7 +536,7 @@ endif
 			invoke printf, CStr("%2u/%3u/0F03/0  - processing state: 0x%X",lf), codec, si, eax
 			invoke sendcmd, ebx, codec, si, 0F06h, 0
 			shld ecx,eax,28
-			shld edx,eax,32
+			mov edx,eax
 			and ecx,0fh
 			and edx,0fh
 			invoke printf, CStr("%2u/%3u/0F06/0  - link stream/channel: 0x%X (stream=%u, channel=%u)",lf), codec, si, eax, ecx, edx
@@ -745,7 +751,7 @@ local ostreams:dword
 			invoke dispcodec, ebx, esi
 			pop ecx
 		.endif
-		shl ecx,1
+		shr ecx,1
 		inc esi
 	.endw
 exit:
