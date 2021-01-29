@@ -337,7 +337,9 @@ local rmcs:RMCS
 	shl eax,16
 	mov ax,rmcs.rBX
 	mov dwXMSPhys,eax
-	invoke printf, CStr(lf,"EMB physical address=%X, used for CORB & RIRB",lf), eax
+	.if bVerbose
+		invoke printf, CStr(lf,"EMB physical address=%X, used for CORB & RIRB",lf), eax
+	.endif
 
 ;--- map the block into linear memory so it can be accessed
 
@@ -480,7 +482,15 @@ endif
 		invoke sendcmd, ebx, codec, si, 0F00h, 9
 		mov wflags, ax
 		;--- [4]: Amp Param Override [5]: stripe, [9]: digital, [10] Power Ctrl, 
-		invoke printf, CStr("%2u/%3u/0F00/9  - widget cap.: 0x%X ([1]=inp amp, [2]=out amp)",lf), codec, esi, eax
+		mov ecx,eax
+		shr ecx,12
+		and ecx,0eh
+		bt eax,0
+		adc ecx,0
+		bt eax,9
+		setc dl
+		movzx edx,dl
+		invoke printf, CStr("%2u/%3u/0F00/9  - widget cap.: 0x%X ([1]=inp amp, [2]=out amp, digital=%u, chnl cnt-1=%u)",lf), codec, esi, eax, edx, ecx
 
 		.if btype == 0 || btype == 1
 			invoke sendcmd, ebx, codec, si, 0F00h, 10
@@ -496,11 +506,22 @@ endif
 			movzx edx,dl
 			invoke printf, CStr("%2u/%3u/0F00/12 - PIN capabilities: 0x%X (presence detect cap.=%u, output cap.=%u)",lf), codec, si, eax, ecx, edx
 		.endif
-		.if btype == 2 || btype == 4
+		.if wflags & 2
+			invoke sendcmd, ebx, codec, si, 0F00h, 13
+			;--- [31]: mute capable, 22:16 stepsize, 14:8 numsteps, 6:0 offset
+			invoke printf, CStr("%2u/%3u/0F00/13 - input amplifier details: 0x%X",lf), codec, si, eax
+			invoke sendcmd, ebx, codec, si, 00Bh, 0      ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
+			invoke printf, CStr("%2u/%3u/000B/0  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
+		.endif
+		.if wflags & 4
 			invoke sendcmd, ebx, codec, si, 0F00h, 18
 			;--- [31]: mute capable, 22:16 stepsize, 14:8 numsteps, 6:0 offset
 			invoke printf, CStr("%2u/%3u/0F00/18 - output amplifier details: 0x%X",lf), codec, si, eax
-			invoke sendcmd, ebx, codec, si, 0F00h, 13
+			invoke sendcmd, ebx, codec, si, 00Bh, 8000h  ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
+			invoke printf, CStr("%2u/%3u/000B/8000  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
+		.endif
+		.if btype == 6
+			invoke sendcmd, ebx, codec, si, 0F00h, 19
 			invoke printf, CStr("%2u/%3u/0F00/13 - volume knob caps: 0x%X",lf), codec, si, eax
 		.endif
 		.if wflags & 100h
@@ -545,13 +566,10 @@ endif
 			call translateformat
 			invoke printf, CStr("%2u/%3u/000A/0  - converter format: 0x%X (rate=%u, bits=%u, channels=%u)",lf), codec, si, eax, ecx, edx, ebx
 			pop ebx
-			.if btype == 0
-				invoke sendcmd, ebx, codec, si, 00Bh, 8000h  ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
-				invoke printf, CStr("%2u/%3u/000B/8000  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
-			.else
-				invoke sendcmd, ebx, codec, si, 00Bh, 0      ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
-				invoke printf, CStr("%2u/%3u/000B/0  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
-			.endif
+		.endif
+		.if btype == 0
+			invoke sendcmd, ebx, codec, si, 0F2Dh, 0    ;converter channel count
+			invoke printf, CStr("%2u/%3u/0F2D/0  - converter channel count: 0x%X",lf), codec, si, eax
 		.endif
 		.if btype == 4
 			invoke sendcmd, ebx, codec, si, 0F07h, 0	;get pin widget control
@@ -622,6 +640,12 @@ exit:
 
 	and [ebx].HDAREGS.corbctl,not 2
 	and [ebx].HDAREGS.rirbctl,not 2
+;--- and, before releasing memory, wait until at least RIRB is really stopped!
+	mov ecx,10000h
+@@:
+	call dowait
+	test [ebx].HDAREGS.rirbctl,2
+	loopnz @B
 
 	mov ax,xmshdl
 	.if ax

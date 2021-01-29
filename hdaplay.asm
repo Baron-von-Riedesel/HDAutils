@@ -7,6 +7,8 @@
 	option proc:private
 
 ?LOGCODEC equ 0	;1 for debugging
+?STREAM   equ 1	;stream # to use
+?CHANNEL  equ 0 ;channel start # to use
 ?SHELL equ 1
 
 lf	equ 10
@@ -345,7 +347,8 @@ local loaonode:word
 			.endif
 		.endif
 		invoke sendcmd, ebx, codec, loaonode, 0002h, wFormat;set converter format
-		invoke sendcmd, ebx, codec, loaonode, 0706h, 10h	;stream is in [7:4], channel in [3:0]
+		;--- set stream & start channel - stream is in [7:4], start channel in [3:0]
+		invoke sendcmd, ebx, codec, loaonode, 0706h, ?STREAM shl 4 or ?CHANNEL
 		invoke sendcmd, ebx, codec, lonode, 0707h, 0C4h		;set pin widget control (out enable, 80%)
 		;--- set amplifier gain/mute for pin, mixer and audio converter
 		;--- 0B040h = output, L&R, 50%, 0F040h = output/input, L&R, 50%
@@ -838,7 +841,7 @@ if 1
 endif
 ;--- init stream4 in HDA controller memory
 
-	mov al,1	;stream 1   
+	mov al,?STREAM
 	shl al,4
 	mov [ebx].HDAREGS.stream4.bCtl2316, al
 	mov [ebx].HDAREGS.stream4.dwLinkPos, 0
@@ -919,7 +922,9 @@ endif
 	.endif
 	.if !eax
 		invoke printf, CStr("no lineout pin found for this device",lf)
+		;--- stop CORB and RIRB DMA engines
 		call stopcr
+		call unmaphda
 		inc currdevice
 		jmp nextdevice
 	.endif
@@ -949,6 +954,8 @@ endif
 		invoke dispstream, addr [ebx].HDAREGS.stream4, 4
 	.endif
 
+	call stopcr
+
 if ?SHELL
 	push ds
 	push offset fcb
@@ -969,8 +976,9 @@ else
 	invoke printf, CStr(lf)
 endif
 
-	and [ebx].HDAREGS.stream4.wCtl, not 2;stop DMA engine
-	call stopcr
+;--- stop DMA engine
+	and [ebx].HDAREGS.stream4.wCtl, not 2
+	call unmaphda
 
 exit:
 	mov ax,xmshdl2
@@ -1013,13 +1021,16 @@ exit:
 	ret
 
 stopcr:
-;--- stop CORB and RIRB DMA engines
-	mov al,[ebx].HDAREGS.corbctl
-	and al,not 2
-	mov [ebx].HDAREGS.corbctl,al
-	mov al,[ebx].HDAREGS.rirbctl
-	and al,not 2
-	mov [ebx].HDAREGS.rirbctl,al
+	and [ebx].HDAREGS.corbctl, not 2
+	and [ebx].HDAREGS.rirbctl, not 2
+	mov ecx,10000h
+@@:
+	call dowait
+	test [ebx].HDAREGS.rirbctl,2
+	loopnz @B
+	retn
+
+unmaphda:
 
 ;--- unmap HDA memory map
 	mov ecx,ebx
