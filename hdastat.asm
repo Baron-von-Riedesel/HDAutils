@@ -426,6 +426,8 @@ local rmcs:RMCS
 ;--- if a AFG has been found, display its pcm rates
 	invoke sendcmd, ebx, codec, afgnode, 0F00h, 10
 	invoke printf, CStr("%2u/%3u/0F00/10 - supported PCM rates: 0x%X",lf), codec, afgnode, eax
+	invoke sendcmd, ebx, codec, afgnode, 0F05h, 0
+	invoke printf, CStr("%2u/%3u/0F05/0  - power state control=0x%X",lf), codec, afgnode, eax
 	invoke sendcmd, ebx, codec, afgnode, 0F00h, 4
 	movzx ecx, al
 	mov edi, ecx
@@ -551,6 +553,10 @@ endif
 				invoke printf, CStr("%2u/%3u/0F01/0  - currently selected connection: %u",lf), codec, si, eax
 			.endif
 			pop edi
+		.endif
+		.if wflags & 400h	;power state control supported?
+			invoke sendcmd, ebx, codec, si, 0F05h, 0
+			invoke printf, CStr("%2u/%3u/0F05/0  - power state control=0x%X",lf), codec, si, eax
 		.endif
 		.if btype == 0 || btype == 1
 			invoke sendcmd, ebx, codec, si, 0F03h, 0

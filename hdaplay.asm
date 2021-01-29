@@ -181,6 +181,7 @@ searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, codec:dword, wFormat:word
 local startnode:dword
 local numnodes:dword
 local numConn:dword
+local afgnode:word
 local hpnode:word
 local lonode:word
 local lomixernode:word
@@ -208,6 +209,7 @@ local loaonode:word
 	.endw
 	cmp edi,0
 	jz exit
+	mov afgnode,si
 
 ;--- get start of afg widgets
 
@@ -258,6 +260,8 @@ local loaonode:word
 	movzx esi,lonode
 	cmp esi,0
 	jz exit
+
+	invoke sendcmd, ebx, codec, afgnode, 7ffh, 0	;reset group (in case it's power saving)
 
 	mov loaonode,0
 	mov lomixernode,0
@@ -346,14 +350,19 @@ local loaonode:word
 				invoke printf, CStr("path: %u/%u",lf), loaonode, lonode
 			.endif
 		.endif
+		invoke sendcmd, ebx, codec, loaonode, 0705h, 0	;set power state
 		invoke sendcmd, ebx, codec, loaonode, 0002h, wFormat;set converter format
 		;--- set stream & start channel - stream is in [7:4], start channel in [3:0]
 		invoke sendcmd, ebx, codec, loaonode, 0706h, ?STREAM shl 4 or ?CHANNEL
-		invoke sendcmd, ebx, codec, lonode, 0707h, 0C4h		;set pin widget control (out enable, 80%)
+
+		invoke sendcmd, ebx, codec, lonode, 0705h, 0	;set power state
+		invoke sendcmd, ebx, codec, lonode, 0707h, 0C0h	;set pin widget control (out enable)
+
 		;--- set amplifier gain/mute for pin, mixer and audio converter
 		;--- 0B040h = output, L&R, 50%, 0F040h = output/input, L&R, 50%
 		invoke sendcmd, ebx, codec, lonode, 0003h, 0F040h
 		.if lomixernode
+			invoke sendcmd, ebx, codec, lomixernode, 0705h, 0	;set power state
 			invoke sendcmd, ebx, codec, lomixernode, 0003h, 0F040h
 		.endif
 		invoke sendcmd, ebx, codec, loaonode, 0003h, 0B040h	;set output for converters
