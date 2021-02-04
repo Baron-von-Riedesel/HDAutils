@@ -133,10 +133,13 @@ nextloop:
 @@:
 	mov ax,1680h
 	int 2Fh
+	cmp al,80h
+	jnz @F
 	in al,61h
 	and al,10h
 	cmp al,dl
 	loopnz @B
+@@:
 	dec dh
 	jnz nextloop
 	ret
@@ -264,6 +267,15 @@ mapphys proc uses ebx esi edi dwPhysBase:dword, dwSize:dword
 	ret
 mapphys endp
 
+WTYPE_AUDIOOUT	equ 0
+WTYPE_AUDIOIN	equ 1
+WTYPE_MIXER		equ 2
+WTYPE_SELECTOR	equ 3
+WTYPE_PIN		equ 4
+WTYPE_POWER		equ 5
+WTYPE_VOLKNOB	equ 6
+WTYPE_BEEPGEN	equ 7
+
 ;--- display codec, nodes and widgets
 
 dispcodec proc uses ebx esi edi pHDA:ptr HDAREGS, codec:dword
@@ -378,7 +390,7 @@ local rmcs:RMCS
 	test byte ptr [ebx].HDAREGS.corbrp+1,80h
 	loopz @B
 	and byte ptr [ebx].HDAREGS.corbrp+1,7fh
-	mov ecx,80000h
+	mov ecx,10000h
 @@:
 	call dowait
 	test byte ptr [ebx].HDAREGS.corbrp+1,80h
@@ -494,11 +506,11 @@ endif
 		movzx edx,dl
 		invoke printf, CStr("%2u/%3u/0F00/9  - widget cap.: 0x%X ([1]=inp amp, [2]=out amp, digital=%u, chnl cnt-1=%u)",lf), codec, esi, eax, edx, ecx
 
-		.if btype == 0 || btype == 1
+		.if btype == WTYPE_AUDIOOUT || btype == WTYPE_AUDIOIN	;converters?
 			invoke sendcmd, ebx, codec, si, 0F00h, 10
 			invoke printf, CStr("%2u/%3u/0F00/10 - supported PCM rates: 0x%X",lf), codec, si, eax
 		.endif
-		.if btype == 4
+		.if btype == WTYPE_PIN
 			invoke sendcmd, ebx, codec, si, 0F00h, 12
 			bt eax,2
 			setc cl
@@ -512,8 +524,28 @@ endif
 			invoke sendcmd, ebx, codec, si, 0F00h, 13
 			;--- [31]: mute capable, 22:16 stepsize, 14:8 numsteps, 6:0 offset
 			invoke printf, CStr("%2u/%3u/0F00/13 - input amplifier details: 0x%X",lf), codec, si, eax
-			invoke sendcmd, ebx, codec, si, 00Bh, 0      ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
-			invoke printf, CStr("%2u/%3u/000B/0  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
+			.if btype == WTYPE_MIXER
+				invoke sendcmd, ebx, codec, si, 0F00h, 14
+				push edi
+				mov edi,eax
+				xor ecx,ecx
+				.while edi
+					push ecx
+					mov edx,ecx
+					shl dx,8
+					invoke sendcmd, ebx, codec, si, 00Bh, dx     ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
+					mov ecx,[esp]
+					shl ecx,8
+					invoke printf, CStr("%2u/%3u/000B/%4X - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, ecx, eax
+					pop ecx
+					dec edi
+					inc ecx
+				.endw
+				pop edi
+			.else
+				invoke sendcmd, ebx, codec, si, 00Bh, 0      ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
+				invoke printf, CStr("%2u/%3u/000B/0  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
+			.endif
 		.endif
 		.if wflags & 4
 			invoke sendcmd, ebx, codec, si, 0F00h, 18
@@ -522,9 +554,11 @@ endif
 			invoke sendcmd, ebx, codec, si, 00Bh, 8000h  ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
 			invoke printf, CStr("%2u/%3u/000B/8000  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
 		.endif
-		.if btype == 6
+		.if btype == WTYPE_VOLKNOB
 			invoke sendcmd, ebx, codec, si, 0F00h, 19
-			invoke printf, CStr("%2u/%3u/0F00/13 - volume knob caps: 0x%X",lf), codec, si, eax
+			invoke printf, CStr("%2u/%3u/0F00/19 - volume knob caps: 0x%X",lf), codec, si, eax
+			invoke sendcmd, ebx, codec, si, 0F0Fh, 0
+			invoke printf, CStr("%2u/%3u/0F0F/0  - volume knob control: 0x%X ([7] direct, [6:0] volume)",lf), codec, si, eax
 		.endif
 		.if wflags & 100h
 			invoke sendcmd, ebx, codec, si, 0F00h, 14
@@ -548,7 +582,10 @@ endif
 				add edi, 4
 			.endw
 			invoke printf, CStr(lf)
-			.if cConn > 1
+			;--- mixer, volknob and power widgets don't have a selection control!
+			.if btype == WTYPE_MIXER || btype == WTYPE_VOLKNOB || btype == WTYPE_POWER
+				;
+			.elseif cConn > 1
 				invoke sendcmd, ebx, codec, si, 0F01h, 0
 				invoke printf, CStr("%2u/%3u/0F01/0  - currently selected connection: %u",lf), codec, si, eax
 			.endif
@@ -558,7 +595,7 @@ endif
 			invoke sendcmd, ebx, codec, si, 0F05h, 0
 			invoke printf, CStr("%2u/%3u/0F05/0  - power state control=0x%X",lf), codec, si, eax
 		.endif
-		.if btype == 0 || btype == 1
+		.if btype == WTYPE_AUDIOOUT || btype == WTYPE_AUDIOIN
 			invoke sendcmd, ebx, codec, si, 0F03h, 0
 			invoke printf, CStr("%2u/%3u/0F03/0  - processing state: 0x%X",lf), codec, si, eax
 			invoke sendcmd, ebx, codec, si, 0F06h, 0
@@ -573,11 +610,11 @@ endif
 			invoke printf, CStr("%2u/%3u/000A/0  - converter format: 0x%X (rate=%u, bits=%u, channels=%u)",lf), codec, si, eax, ecx, edx, ebx
 			pop ebx
 		.endif
-		.if btype == 0
+		.if btype == WTYPE_AUDIOOUT
 			invoke sendcmd, ebx, codec, si, 0F2Dh, 0    ;converter channel count
 			invoke printf, CStr("%2u/%3u/0F2D/0  - converter channel count: 0x%X",lf), codec, si, eax
 		.endif
-		.if btype == 4
+		.if btype == WTYPE_PIN
 			invoke sendcmd, ebx, codec, si, 0F07h, 0	;get pin widget control
 			bt ax,7
 			.if CARRY?
@@ -840,7 +877,7 @@ local dwPhysBase:dword
 	mov cx,word ptr dwPhysBase+0
 	mov bx,word ptr dwPhysBase+2
 	mov si,0000h
-	mov di,1100h
+	mov di,1000h
 	mov ax,0800h
 	int 31h
 	jc exit
@@ -874,7 +911,15 @@ if 1
 	call int_1a
 	.if ah == 0
 		movzx ecx,cx
+		push ecx
 		invoke printf, CStr("  CMD=0x%X ([0]=IOSE,[1]=MSE (Memory Space Enable),[2]=BME (Bus Master Enable)",lf), ecx
+		pop ecx
+		test cl,4		;busmaster enabled?
+		jnz @F
+		or cl,4			;enable busmaster - needed for CORB/RIRB access
+		mov ax,0B10Ch
+		call int_1a
+@@:
 	.endif
 endif
 	mov edi,6		;PCI STS (device status

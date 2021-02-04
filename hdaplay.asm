@@ -13,7 +13,7 @@
 ?LOGCODEC equ 0	;1 for debugging
 ?STREAM   equ 1	;stream # to use
 ?CHANNEL  equ 0	;channel start # to use
-?DISPCR   equ 0	;1 display corb/rirp status
+?DISPCR   equ 1	;1 display corb/rirp status
 ?SHELL    equ 1	;1 launch a shell, 0 wait for ESC key
 
 lf	equ 10
@@ -57,8 +57,15 @@ WAVEFMT ends
 rmstack dd ?	;real-mode stack ( PCI int 1Ah wants 1 kB stack space )
 pCorb   dd ?	;linear address CORB
 pRirb   dd ?	;linear address RIRB
+
+;--- wWidget, wCodec and wDevice must be consecutive!
+wWidget dw 0	;-w option
+wCodec  dw 0
+wDevice dw 0
+
 bQuiet  db 0	;-q option
 bReset  db 0	;-r option
+bVerbose db 0	;-v option
 
 if ?SHELL
 fcb		db 0, "           ", 0, 0, 0, 0
@@ -90,9 +97,7 @@ local rmcs:RMCS
 	mov bx,1Ah
 	mov cx,0
 	mov ax,0300h
-	push ebp
 	int 31h
-	pop ebp
 	jc @F
 	mov ah,byte ptr rmcs.rFlags
 	sahf
@@ -134,10 +139,13 @@ nextloop:
 @@:
 	mov ax,1680h
 	int 2Fh
+	cmp al,80h
+	jnz @F
 	in al,61h
 	and al,10h
 	cmp al,dl
 	loopnz @B
+@@:
 	dec dh
 	jnz nextloop
 	ret
@@ -197,22 +205,24 @@ WTYPE_AUDIOOUT equ 0
 WTYPE_MIXER    equ 2
 WTYPE_PIN      equ 4
 
-searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, codec:dword, wFormat:word
+searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, device:dword, codec:dword, wFormat:word
 
 local startnode:dword
 local numnodes:dword
 local nConn:dword
 local nConnMixer:dword
+local pinconn:dword
 local afgnode:word
-local hpnode:word
-local lonode:word
-local lomixernode:word
-local loaonode:word
+local hppinnode:word
+local pinnode:word
+local mixernode:word
+local mixeridx:word
+local aonode:word
 local wIdx:word
 
 ;--- get start of root nodes
 
-	mov lonode,0
+	mov pinnode,0
 	mov ebx, pHDA
 	invoke sendcmd, ebx, codec, 0, 0F00h, 4
 	movzx ecx, al
@@ -244,7 +254,28 @@ local wIdx:word
 	mov esi, edx
 	mov startnode, esi
 	mov numnodes, edi
-	mov hpnode,0
+	mov hppinnode,0
+
+;--- pin set with -w option?
+	mov ax,wWidget
+	.if ax
+		mov ecx,device
+		mov edx,codec
+		add edi, esi
+		.if cx != wDevice || dx != wCodec || ax < si || ax > di
+			jmp exit
+		.endif
+		invoke sendcmd, ebx, codec, ax, 0F00h, 9	;get widgettype of -w option parameter
+		shr eax,20
+		and al,0Fh
+		.if al == WTYPE_PIN
+			mov ax,wWidget
+			mov pinnode, ax
+			jmp pinnode_found
+		.else
+			invoke printf, CStr("widget %u is no pin - ignored",lf), wWidget
+		.endif
+	.endif
 
 ;--- scan afg widgets, searching "lineout" and "headphone" pins
 
@@ -252,7 +283,7 @@ local wIdx:word
 		invoke sendcmd, ebx, codec, si, 0F00h, 9	;get widgettype
 		shld ecx, eax, 12
 		and ecx,0fh
-		.if cx == WTYPE_PIN
+		.if cl == WTYPE_PIN
 			invoke sendcmd, ebx, codec, si, 0F1Ch, 0	;get default config
 			shld ecx,eax,12
 			and ecx,0Fh
@@ -263,24 +294,26 @@ local wIdx:word
 				.if !bQuiet
 					invoke printf, CStr("lineout pin widget: %u",lf), esi
 				.endif
-				.if lonode == 0
-					mov lonode, si
+				.if pinnode == 0
+					mov pinnode, si
 				.elseif edx == 4 ;color green?
-					mov lonode, si
+					mov pinnode, si
 				.endif
 			.elseif ecx == 2
 				.if !bQuiet
 					invoke printf, CStr("headphone pin widget: %u",lf), esi
 				.endif
-				mov hpnode, si
+				mov hppinnode, si
 			.endif
 		.endif
 		inc esi
 		dec edi
 	.endw
 
-;--- without lineout pin, there's nothing to do
-	movzx esi,lonode
+pinnode_found:
+
+;--- without a (lineout) pin, there's nothing to do
+	movzx esi,pinnode
 	cmp esi,0
 	jz exit
 
@@ -289,104 +322,109 @@ local wIdx:word
 		invoke sendcmd, ebx, codec, afgnode, 7ffh, 0	;reset afg
 	.endif
 
-	mov loaonode,0
-	mov lomixernode,0
+	mov aonode,0
+	mov mixernode,0
 
-;--- get connections of "lineout" pin.
+;--- get connections of (lineout) pin.
 ;--- two cases are handled:
-;--- 1. connection lineout -> audio output
-;--- 2. connection lineout -> mixer -> audio output
+;--- 1. connection (lineout) pin -> audio output
+;--- 2. connection (lineout) pin -> mixer -> audio output
 
-	invoke sendcmd, ebx, codec, si, 0F00h, 14	;get connections of lineout pin
+	invoke sendcmd, ebx, codec, pinnode, 0F00h, 14	;get connections of lineout pin
 	mov nConn, eax
 	xor edi, edi
 	xor eax, eax
 	.while edi < nConn
 		.if !eax
-			invoke sendcmd, ebx, codec, si, 0F02h, di	;get (up to 4) connection nodes
+			invoke sendcmd, ebx, codec, pinnode, 0F02h, di	;get (up to 4) connection nodes
 		.endif
-		push esi
-		push eax
+		mov pinconn, eax
 		movzx esi,al
 		invoke sendcmd, ebx, codec, si, 0F00h, 9
 		shld ecx, eax, 12
 		and ecx,0fh
 		.if ecx == WTYPE_AUDIOOUT
-			mov loaonode, si
+			mov aonode, si
+			.if nConn > 1
+				invoke sendcmd, ebx, codec, pinnode, 0701h, di	;select connection
+			.endif
+			.break
 		.elseif ecx == WTYPE_MIXER
 			invoke sendcmd, ebx, codec, si, 0F00h, 14	;get connections
 			mov nConnMixer, eax
 			push edi
 			xor edi, edi
 			xor eax, eax
-			.while edi < nConnMixer && loaonode == 0
+			.while edi < nConnMixer
 				.if !eax
 					invoke sendcmd, ebx, codec, si, 0F02h, di	;get connection nodes
 				.endif
-				push esi
 				push eax
-				movzx esi,al
-				invoke sendcmd, ebx, codec, si, 0F00h, 9
+				movzx eax,al
+				invoke sendcmd, ebx, codec, ax, 0F00h, 9
 				shld ecx, eax, 12
 				and ecx,0fh
-				.if ecx == WTYPE_AUDIOOUT
-					mov loaonode, si
-					mov wIdx, di
-				.endif
 				pop eax
-				pop esi
+				.if ecx == WTYPE_AUDIOOUT
+					movzx edx,al
+					mov aonode, dx
+					mov mixernode, si
+					mov mixeridx, di
+if 0 ; a mixer has no select control   
+					.if nConnMixer > 1
+						invoke sendcmd, ebx, codec, si, 0701h, di
+					.endif
+endif
+					.break
+				.endif
 				shr eax,8
 				inc edi
 			.endw
 			pop edi
-			.if loaonode
-				mov lomixernode, si
-				.if nConnMixer > 1
-					invoke sendcmd, ebx, codec, si, 0701h, wIdx
+			.if mixernode
+				.if nConn > 1
+					invoke sendcmd, ebx, codec, pinnode, 0701h, di
 				.endif
+				.break
 			.endif
 		.endif
-		pop eax
-		pop esi
-		.if loaonode
-			.if nConn > 1
-				invoke sendcmd, ebx, codec, lonode, 0701h, di	;select connection
-			.endif
-			.break
-		.endif
+		mov eax,pinconn
 		shr eax,8
 		inc edi
 	.endw
 
 ;--- if an "audio converter" has been found, the path is complete
 
-	.if loaonode
+	.if aonode
 		.if !bQuiet
-			.if lomixernode
-				invoke printf, CStr("path: %u/%u/%u",lf), loaonode, lomixernode, lonode
+			.if mixernode
+				invoke printf, CStr("path: %u/%u/%u",lf), aonode, mixernode, pinnode
 			.else
-				invoke printf, CStr("path: %u/%u",lf), loaonode, lonode
+				invoke printf, CStr("path: %u/%u",lf), aonode, pinnode
 			.endif
 		.endif
-		invoke sendcmd, ebx, codec, loaonode, 0705h, 0	;set power state
-		invoke sendcmd, ebx, codec, loaonode, 0002h, wFormat;set converter format
+		invoke sendcmd, ebx, codec, aonode, 0705h, 0	;set power state
+		invoke sendcmd, ebx, codec, aonode, 0002h, wFormat;set converter format
 		;--- set stream & start channel - stream is in [7:4], start channel in [3:0]
-		invoke sendcmd, ebx, codec, loaonode, 0706h, ?STREAM shl 4 or ?CHANNEL
+		invoke sendcmd, ebx, codec, aonode, 0706h, ?STREAM shl 4 or ?CHANNEL
 
-		invoke sendcmd, ebx, codec, lonode, 0705h, 0	;set power state
-		invoke sendcmd, ebx, codec, lonode, 0707h, 0C0h	;set pin widget control (out enable)
+		invoke sendcmd, ebx, codec, pinnode, 0705h, 0	;set power state
+		invoke sendcmd, ebx, codec, pinnode, 0707h, 0C0h	;set pin widget control (out enable)
 
 		;--- set amplifier gain/mute for pin, mixer and audio converter
 		;--- 0B040h = output, L&R, 50%, 0F040h = output/input, L&R, 50%
-		invoke sendcmd, ebx, codec, lonode, 0003h, 0F040h
-		.if lomixernode
-			invoke sendcmd, ebx, codec, lomixernode, 0705h, 0	;set power state
-			invoke sendcmd, ebx, codec, lomixernode, 0003h, 0F040h
+		invoke sendcmd, ebx, codec, pinnode, 0003h, 0F040h
+		.if mixernode
+			invoke sendcmd, ebx, codec, mixernode, 0705h, 0	;set power state
+			mov ax,mixeridx
+			shl ax,8
+			or ax, 07040h
+			invoke sendcmd, ebx, codec, mixernode, 0003h, ax;set input amplifier for the ao input   
 		.endif
-		invoke sendcmd, ebx, codec, loaonode, 0003h, 0B040h	;set output for converters
+		invoke sendcmd, ebx, codec, aonode, 0003h, 0B040h	;set output for converters
 	.endif
 exit:
-	movzx eax,lonode
+	movzx eax,pinnode
 	ret
 searchaopath endp
 
@@ -555,6 +593,17 @@ local dwPhysBase:dword
 	.if !bQuiet
 		invoke printf, CStr("HDA Base Address=0x%X",lf), dwPhysBase
 	.endif
+if 1 ;ensure that busmaster is enabled
+	mov edi,4		;PCI CMD
+	mov ax,0B109h	;read word
+	call int_1a
+	test cl,4
+	jnz @F
+	or cl,4
+	mov ax,0B10Ch	;write word
+	call int_1a
+@@:
+endif
 	mov eax, dwPhysBase
 	ret
 exit:
@@ -814,15 +863,14 @@ nextdevice:
 		jmp exit
 	.endif
 
-	invoke mapphys, eax, 1100h	;1100h is the max size (HDA with 32 streams)
+	invoke mapphys, eax, 1000h	;map the HDA registers into linear address space
 	jc exit
 	mov pHDALin, eax
 
 ;--- HDA controller in reset?
 
 	mov ebx, eax
-	mov eax, [ebx].HDAREGS.gctl
-	test eax,1
+	test [ebx].HDAREGS.gctl,1
 	jnz hda_running
 	or [ebx].HDAREGS.gctl,1
 	mov ecx,80000h
@@ -846,7 +894,7 @@ hda_running:
 	mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
 
 if ?DISPCR
-	.if !bQuiet
+	.if bVerbose
 		invoke printf, CStr(lf,"CORB/RIRB before init",lf)
 		call dispcr
 	.endif
@@ -882,7 +930,7 @@ endif
 	or [ebx].HDAREGS.rirbctl,2
 
 if ?DISPCR
-	.if !bQuiet
+	.if bVerbose
 		invoke printf, CStr(lf,"CORB/RIRB after init",lf)
 		call dispcr
 	.endif
@@ -894,12 +942,12 @@ endif
 	mov esi,0
 	movzx ecx, [ebx].HDAREGS.statests
 	.if (ecx == 0)
-		invoke searchaopath, ebx, esi, wFormat
+		invoke searchaopath, ebx, currdevice, esi, wFormat
 	.else
 		.while ecx
 			.if ecx & 1
 				push ecx
-				invoke searchaopath, ebx, esi, wFormat
+				invoke searchaopath, ebx, currdevice, esi, wFormat
 				pop ecx
 				.break .if eax
 			.endif
@@ -920,32 +968,38 @@ endif
 
 ;--- a HDA with lineout pin has been found
 
-;--- reset stream4
+;--- reset first output stream
+;--- first, position EDI to the first output stream
+	movzx edi,[ebx].HDAREGS.gcap
+	shr edi,8
+	and edi,0fh	;no of input streams
+	shl edi,5	;*32 (=sizeof STREAM)
+	lea edi,[ebx+edi+HDAREGS.stream0]
 
-	or [ebx].HDAREGS.stream4.wCtl, 1
-	.while !([ebx].HDAREGS.stream4.wCtl & 1)
+	or [edi].STREAM.wCtl, 1
+	.while !([edi].STREAM.wCtl & 1)
 		call dowait
 	.endw
-	and [ebx].HDAREGS.stream4.wCtl, not 1
-	.while [ebx].HDAREGS.stream4.wCtl & 1
+	and [edi].STREAM.wCtl, not 1
+	.while [edi].STREAM.wCtl & 1
 		call dowait
 	.endw
 
-;--- init stream4 in HDA controller memory
+;--- init stream[x] in HDA controller memory
 
 	mov al,?STREAM
 	shl al,4
-	mov [ebx].HDAREGS.stream4.bCtl2316, al
-	mov [ebx].HDAREGS.stream4.dwLinkPos, 0
+	mov [edi].STREAM.bCtl2316, al
+	mov [edi].STREAM.dwLinkPos, 0
 	mov eax,datahdr.subchkSiz
-	mov [ebx].HDAREGS.stream4.dwBufLen, eax
-	mov [ebx].HDAREGS.stream4.wLastIdx, 1
+	mov [edi].STREAM.dwBufLen, eax
+	mov [edi].STREAM.wLastIdx, 1
 	mov ax, wFormat
-	mov [ebx].HDAREGS.stream4.wFormat, ax
+	mov [edi].STREAM.wFormat, ax
 	mov edx, dwXMSPhys1
 	add edx, 256*(4+8)	;calculate BDL physical address
-	mov dword ptr [ebx].HDAREGS.stream4.qwBuffer+0, edx
-	mov dword ptr [ebx].HDAREGS.stream4.qwBuffer+4, 0
+	mov dword ptr [edi].STREAM.qwBuffer+0, edx
+	mov dword ptr [edi].STREAM.qwBuffer+4, 0
 
 ;--- the HDA is ready to start the DMA process
 ;--- map memory for samples in address space, read samples, and unmap buffer 
@@ -962,14 +1016,17 @@ endif
 	pop bx
 	mov ax,0801h	;unmap linear region in BX:CX
 	int 31h
+	mov ebx, pHDALin
 
 ;--- run the DMA engine
 
-	mov ebx, pHDALin
-	or [ebx].HDAREGS.stream4.wCtl, 2
+	or [edi].STREAM.wCtl, 2
 
 	.if !bQuiet
-		invoke dispstream, addr [ebx].HDAREGS.stream4, 4
+		movzx eax,[ebx].HDAREGS.gcap
+		shr eax,8
+		and eax,0Fh
+		invoke dispstream, edi, eax
 	.endif
 
 	call stopcr
@@ -986,7 +1043,6 @@ if ?SHELL
 	mov ax,4B00h
 	int 21h
 	add esp,6*4
-	mov ebx,pHDALin
 else
 	invoke printf, CStr("press a key to continue...")
 	mov ah,10h
@@ -995,7 +1051,7 @@ else
 endif
 
 ;--- stop DMA engine
-	and [ebx].HDAREGS.stream4.wCtl, not 2
+	and [edi].STREAM.wCtl, not 2
 	call unmaphda
 
 exit:
@@ -1057,6 +1113,37 @@ unmaphda:
 
 playwavewithHDA endp
 
+getwidget proc
+	xor edx,edx
+nextnum:
+	xor ecx,ecx
+	mov al,[edi]
+	.while al && al != ','
+		sub al,'0'
+		jb error
+		cmp al,9
+		ja error
+		movzx eax,al
+		imul ecx,10
+		add ecx,eax
+		inc edi
+		mov al,[edi]
+	.endw
+	mov [edx*2+offset wWidget],cx
+	.if al == ','
+		cmp edx,2
+		jae error
+		inc edx
+		inc edi
+		jmp nextnum
+	.endif
+	clc
+	ret
+error:
+	stc
+	ret
+getwidget endp
+
 ;--- find a path to lineout and stream a .wav file
 
 main proc c argc:dword,argv:dword
@@ -1078,6 +1165,12 @@ local pszFN:dword
 				or bQuiet, 1
 			.elseif ah == 'r'
 				or bReset, 1
+			.elseif ah == 'v'
+				or bVerbose, 1
+			.elseif ah == 'w'
+				add edi,2
+				call getwidget
+				jc usage
 			.else
 				jmp usage
 			.endif
@@ -1116,8 +1209,10 @@ usage:
 	invoke printf, CStr("play PCM file (.wav) with HD Audio",lf)
 	invoke printf, CStr("usage: hdaplay [ options ] filename",lf)
 	invoke printf, CStr("options:",lf)
-	invoke printf, CStr("  -q : quiet",lf)
+	invoke printf, CStr("  -q : quiet (means: no displays)",lf)
 	invoke printf, CStr("  -r : reset Audio Function Group",lf)
+	invoke printf, CStr("  -v : more displays",lf)
+	invoke printf, CStr("  -w<p[,c,d]>: set pin widget, p=pin, c=codec, d=device",lf)
 	ret
 error1:
 	invoke printf, CStr("no PCI BIOS implemented",lf)
