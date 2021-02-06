@@ -125,3 +125,14 @@ BDLENTRY ends
 ;--- 7:4 def. association
 ;--- 3:0 sequence
 
+;--- widget types
+
+WTYPE_AUDIOOUT	equ 0
+WTYPE_AUDIOIN	equ 1
+WTYPE_MIXER		equ 2
+WTYPE_SELECTOR	equ 3
+WTYPE_PIN		equ 4
+WTYPE_POWER		equ 5
+WTYPE_VOLKNOB	equ 6
+WTYPE_BEEPGEN	equ 7
+

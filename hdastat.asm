@@ -175,7 +175,7 @@ sendcmd proc uses ebx esi pHDA:ptr, codec:dword, node:word, command:word, param:
 	mov [ecx+edx*4], eax
 	mov [ebx].HDAREGS.corbwp, dx
 
-	mov ecx,80000h
+	mov ecx,1000h
 	.while si == [ebx].HDAREGS.rirbwp
 		call dowait
 		dec ecx
@@ -266,15 +266,6 @@ mapphys proc uses ebx esi edi dwPhysBase:dword, dwSize:dword
 	pop eax
 	ret
 mapphys endp
-
-WTYPE_AUDIOOUT	equ 0
-WTYPE_AUDIOIN	equ 1
-WTYPE_MIXER		equ 2
-WTYPE_SELECTOR	equ 3
-WTYPE_PIN		equ 4
-WTYPE_POWER		equ 5
-WTYPE_VOLKNOB	equ 6
-WTYPE_BEEPGEN	equ 7
 
 ;--- display codec, nodes and widgets
 
@@ -524,28 +515,8 @@ endif
 			invoke sendcmd, ebx, codec, si, 0F00h, 13
 			;--- [31]: mute capable, 22:16 stepsize, 14:8 numsteps, 6:0 offset
 			invoke printf, CStr("%2u/%3u/0F00/13 - input amplifier details: 0x%X",lf), codec, si, eax
-			.if btype == WTYPE_MIXER
-				invoke sendcmd, ebx, codec, si, 0F00h, 14
-				push edi
-				mov edi,eax
-				xor ecx,ecx
-				.while edi
-					push ecx
-					mov edx,ecx
-					shl dx,8
-					invoke sendcmd, ebx, codec, si, 00Bh, dx     ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
-					mov ecx,[esp]
-					shl ecx,8
-					invoke printf, CStr("%2u/%3u/000B/%4X - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, ecx, eax
-					pop ecx
-					dec edi
-					inc ecx
-				.endw
-				pop edi
-			.else
-				invoke sendcmd, ebx, codec, si, 00Bh, 0      ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
-				invoke printf, CStr("%2u/%3u/000B/0  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
-			.endif
+			invoke sendcmd, ebx, codec, si, 00Bh, 0      ;b15: 1=output amp, 0=input amp;b13: 1=left, 0=right
+			invoke printf, CStr("%2u/%3u/000B/0  - amplifier gain/mute: 0x%X ([7] mute, [6:0] gain)",lf), codec, si, eax
 		.endif
 		.if wflags & 4
 			invoke sendcmd, ebx, codec, si, 0F00h, 18
@@ -770,11 +741,11 @@ local ostreams:dword
 	invoke printf, CStr("    +64 CORB base address=0x%lX",lf), [ebx].HDAREGS.corbbase
 	invoke printf, CStr("    +72 CORB WP=0x%X, RP=0x%X",lf), [ebx].HDAREGS.corbwp,[ebx].HDAREGS.corbrp
 	invoke printf, CStr("    +76 CORB control=0x%X ([1] 0=DMA Stop, 1=DMA Run)",lf), [ebx].HDAREGS.corbctl
-	invoke printf, CStr("    +78 CORB size=0x%X ([7:4] size cap [bitfield],[1:0] size [0,1,2])",lf), [ebx].HDAREGS.corbsize
+	invoke printf, CStr("    +78 CORB size=0x%X ([7:4] size cap [bitmask],[1:0] size [0=2,1=16,2=256,3=rsvd])",lf), [ebx].HDAREGS.corbsize
 	invoke printf, CStr("    +80 RIRB base address=0x%lX",lf), [ebx].HDAREGS.rirbbase
 	invoke printf, CStr("    +88 RIRB WP=0x%X, RIC=0x%X",lf), [ebx].HDAREGS.rirbwp,[ebx].HDAREGS.rirbric
 	invoke printf, CStr("    +92 RIRB control=0x%X ([1] 0=DMA Stop, 1=DMA Run)",lf), [ebx].HDAREGS.rirbctl
-	invoke printf, CStr("    +94 RIRB size=0x%X ([7:4] size cap, [1:0] size)",lf), [ebx].HDAREGS.rirbsize
+	invoke printf, CStr("    +94 RIRB size=0x%X ([7:4] size cap [bitmask],[1:0] size [0=2,1=16,2=256,3=rsvd])",lf), [ebx].HDAREGS.rirbsize
 
 	.if bVerbose
 		invoke printf, CStr("    Immediate command=0x%X",lf), [ebx].HDAREGS.ic

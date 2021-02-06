@@ -170,9 +170,9 @@ sendcmd proc uses ebx esi pHDA:ptr, codec:dword, node:word, command:word, param:
 	.endif
 	or eax, ecx
 	or eax, edx
- if ?LOGCODEC
+if ?LOGCODEC
 	push eax
- endif
+endif
 	mov si,[ebx].HDAREGS.rirbwp
 
 	mov ecx, pCorb
@@ -180,45 +180,88 @@ sendcmd proc uses ebx esi pHDA:ptr, codec:dword, node:word, command:word, param:
 	inc dl
 	mov [ecx+edx*4], eax
 	mov [ebx].HDAREGS.corbwp, dx
-
+if ?LOGCODEC
+	mov ecx,10000h
+	push eax
+@@:
+	mov ax,[ebx].HDAREGS.corbrp
+	cmp ax,dx
+	loopnz @B
+	pop eax
+	.if ecx
+		invoke printf, CStr("sendcmd: cmd %X send, waiting for response",lf), eax
+	.else
+		invoke printf, CStr("sendcmd: timeout waiting for cmd %X to be sent",lf), eax
+	.endif
+endif
 	.while si == [ebx].HDAREGS.rirbwp
 		call dowait
 	.endw
 	mov ecx,pRirb
 	movzx edx,[ebx].HDAREGS.rirbwp
 	mov eax,[ecx+edx*8]
- if ?LOGCODEC
+if ?LOGCODEC
 	pop ecx 
 	push eax
 	invoke printf, CStr("sendcmd: sent %X, received %X",lf), ecx, eax
 	pop eax
- endif
+endif
 	ret
 sendcmd endp
 
-;--- get "line out" pin widget, get its connections
-;--- and search the path to corresponding "audio output"
-;--- accept connection paths pin->dac and pin->mixer->dac.
+checkconn proc uses esi edi codec:dword, node:word, wtype:word
 
-;--- widget types
-WTYPE_AUDIOOUT equ 0
-WTYPE_MIXER    equ 2
-WTYPE_PIN      equ 4
+local nConn:dword
+local currConn:dword
+
+	movzx esi, node
+	invoke sendcmd, ebx, codec, si, 0F00h, 14	;get connections of widget
+	mov nConn, eax
+	xor edi, edi
+	xor eax, eax
+	.while edi < nConn
+		.if !eax
+			invoke sendcmd, ebx, codec, si, 0F02h, di	;get (up to 4) connection nodes
+		.endif
+		mov currConn, eax
+		movzx esi,al
+		invoke sendcmd, ebx, codec, si, 0F00h, 9	;get widgettype
+		shld ecx, eax, 12
+		and ecx,0fh
+		.if ecx == WTYPE_AUDIOOUT
+			invoke sendcmd, ebx, codec, si, 0705h, 0	;set power state
+			invoke sendcmd, ebx, codec, si, 0003h, 0B040h;set amplifier
+			.break
+		.endif
+		invoke checkconn, codec, si, cx
+		mov esi, eax
+		.break .if eax
+		mov eax, currConn
+		shr eax,8
+		inc edi
+	.endw
+	.if edi < nConn
+		.if nConn > 1 && wtype != WTYPE_MIXER
+			invoke sendcmd, ebx, codec, node, 0701h, di	;select connection
+		.endif
+		invoke sendcmd, ebx, codec, node, 0705h, 0	;set power state
+		invoke sendcmd, ebx, codec, node, 0003h, 0F040h;set amplifier
+		mov eax, esi
+	.endif
+	ret
+
+checkconn endp
+
+;--- get "line out" pin widget
+;--- and search a path to corresponding "audio output" widget
 
 searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, device:dword, codec:dword, wFormat:word
 
 local startnode:dword
 local numnodes:dword
-local nConn:dword
-local nConnMixer:dword
-local pinconn:dword
 local afgnode:word
-local hppinnode:word
+;local hppinnode:word
 local pinnode:word
-local mixernode:word
-local mixeridx:word
-local aonode:word
-local wIdx:word
 
 ;--- get start of root nodes
 
@@ -254,7 +297,7 @@ local wIdx:word
 	mov esi, edx
 	mov startnode, esi
 	mov numnodes, edi
-	mov hppinnode,0
+;	mov hppinnode,0
 
 ;--- pin set with -w option?
 	mov ax,wWidget
@@ -291,19 +334,19 @@ local wIdx:word
 			shr edx,12
 			and edx,0fh
 			.if ecx == 0
-				.if !bQuiet
-					invoke printf, CStr("lineout pin widget: %u",lf), esi
-				.endif
-				.if pinnode == 0
+				.if pinnode == 0 || edx == 4 ;color green?
 					mov pinnode, si
-				.elseif edx == 4 ;color green?
-					mov pinnode, si
+					.if !bQuiet
+						invoke printf, CStr("codec %u, lineout pin widget: %u",lf), codec, esi
+					.endif
 				.endif
+if 0
 			.elseif ecx == 2
 				.if !bQuiet
-					invoke printf, CStr("headphone pin widget: %u",lf), esi
+					invoke printf, CStr("codec %u, headphone pin widget: %u",lf), codec, esi
 				.endif
 				mov hppinnode, si
+endif
 			.endif
 		.endif
 		inc esi
@@ -313,8 +356,7 @@ local wIdx:word
 pinnode_found:
 
 ;--- without a (lineout) pin, there's nothing to do
-	movzx esi,pinnode
-	cmp esi,0
+	cmp pinnode,0
 	jz exit
 
 	invoke sendcmd, ebx, codec, afgnode, 0705h, 0	;set power state
@@ -322,107 +364,22 @@ pinnode_found:
 		invoke sendcmd, ebx, codec, afgnode, 7ffh, 0	;reset afg
 	.endif
 
-	mov aonode,0
-	mov mixernode,0
+;--- check connections of (lineout) pin to find audio output converter
 
-;--- get connections of (lineout) pin.
-;--- two cases are handled:
-;--- 1. connection (lineout) pin -> audio output
-;--- 2. connection (lineout) pin -> mixer -> audio output
-
-	invoke sendcmd, ebx, codec, pinnode, 0F00h, 14	;get connections of lineout pin
-	mov nConn, eax
-	xor edi, edi
-	xor eax, eax
-	.while edi < nConn
-		.if !eax
-			invoke sendcmd, ebx, codec, pinnode, 0F02h, di	;get (up to 4) connection nodes
-		.endif
-		mov pinconn, eax
-		movzx esi,al
-		invoke sendcmd, ebx, codec, si, 0F00h, 9
-		shld ecx, eax, 12
-		and ecx,0fh
-		.if ecx == WTYPE_AUDIOOUT
-			mov aonode, si
-			.if nConn > 1
-				invoke sendcmd, ebx, codec, pinnode, 0701h, di	;select connection
-			.endif
-			.break
-		.elseif ecx == WTYPE_MIXER
-			invoke sendcmd, ebx, codec, si, 0F00h, 14	;get connections
-			mov nConnMixer, eax
-			push edi
-			xor edi, edi
-			xor eax, eax
-			.while edi < nConnMixer
-				.if !eax
-					invoke sendcmd, ebx, codec, si, 0F02h, di	;get connection nodes
-				.endif
-				push eax
-				movzx eax,al
-				invoke sendcmd, ebx, codec, ax, 0F00h, 9
-				shld ecx, eax, 12
-				and ecx,0fh
-				pop eax
-				.if ecx == WTYPE_AUDIOOUT
-					movzx edx,al
-					mov aonode, dx
-					mov mixernode, si
-					mov mixeridx, di
-if 0 ; a mixer has no select control   
-					.if nConnMixer > 1
-						invoke sendcmd, ebx, codec, si, 0701h, di
-					.endif
-endif
-					.break
-				.endif
-				shr eax,8
-				inc edi
-			.endw
-			pop edi
-			.if mixernode
-				.if nConn > 1
-					invoke sendcmd, ebx, codec, pinnode, 0701h, di
-				.endif
-				.break
-			.endif
-		.endif
-		mov eax,pinconn
-		shr eax,8
-		inc edi
-	.endw
-
-;--- if an "audio converter" has been found, the path is complete
-
-	.if aonode
+	invoke checkconn, codec, pinnode, WTYPE_PIN
+	.if eax
+		mov esi, eax
 		.if !bQuiet
-			.if mixernode
-				invoke printf, CStr("path: %u/%u/%u",lf), aonode, mixernode, pinnode
-			.else
-				invoke printf, CStr("path: %u/%u",lf), aonode, pinnode
-			.endif
+			invoke printf, CStr("codec %u, audio converter widget used: %u",lf), codec, si
 		.endif
-		invoke sendcmd, ebx, codec, aonode, 0705h, 0	;set power state
-		invoke sendcmd, ebx, codec, aonode, 0002h, wFormat;set converter format
+		invoke sendcmd, ebx, codec, si, 0002h, wFormat;set converter format
 		;--- set stream & start channel - stream is in [7:4], start channel in [3:0]
-		invoke sendcmd, ebx, codec, aonode, 0706h, ?STREAM shl 4 or ?CHANNEL
-
-		invoke sendcmd, ebx, codec, pinnode, 0705h, 0	;set power state
-		invoke sendcmd, ebx, codec, pinnode, 0707h, 0C0h	;set pin widget control (out enable)
-
-		;--- set amplifier gain/mute for pin, mixer and audio converter
-		;--- 0B040h = output, L&R, 50%, 0F040h = output/input, L&R, 50%
-		invoke sendcmd, ebx, codec, pinnode, 0003h, 0F040h
-		.if mixernode
-			invoke sendcmd, ebx, codec, mixernode, 0705h, 0	;set power state
-			mov ax,mixeridx
-			shl ax,8
-			or ax, 07040h
-			invoke sendcmd, ebx, codec, mixernode, 0003h, ax;set input amplifier for the ao input   
-		.endif
-		invoke sendcmd, ebx, codec, aonode, 0003h, 0B040h	;set output for converters
+		invoke sendcmd, ebx, codec, si, 0706h, ?STREAM shl 4 or ?CHANNEL
 	.endif
+	invoke sendcmd, ebx, codec, pinnode, 0705h, 0	;set power state
+	invoke sendcmd, ebx, codec, pinnode, 0003h, 0F040h;set amplifier
+	invoke sendcmd, ebx, codec, pinnode, 0707h, 040h	;set pin widget control (out enable)
+
 exit:
 	movzx eax,pinnode
 	ret
@@ -528,7 +485,7 @@ dispcr proc
 	.else
 		mov ecx, CStr("DMA stopped")
 	.endif
-	invoke printf, CStr("CORB status=0x%X, control=0x%X - %s",lf), [ebx].HDAREGS.corbsts, dl, ecx
+	invoke printf, CStr("CORB status=0x%X, size=0x%X, ctrl=0x%X - %s",lf), [ebx].HDAREGS.corbsts, [ebx].HDAREGS.corbsize, dl, ecx
 
 	invoke printf, CStr("RIRB address=0x%lX, WP=%u, RIC=%u",lf),
 		[ebx].HDAREGS.rirbbase, [ebx].HDAREGS.rirbwp,[ebx].HDAREGS.rirbric
@@ -538,7 +495,7 @@ dispcr proc
 	.else
 		mov ecx, CStr("DMA stopped")
 	.endif
-	invoke printf, CStr("RIRB status=0x%X, control=0x%X - %s",lf), [ebx].HDAREGS.rirbsts, dl, ecx
+	invoke printf, CStr("RIRB status=0x%X, size=0x%X, ctrl=0x%X - %s",lf), [ebx].HDAREGS.rirbsts, [ebx].HDAREGS.rirbsize, dl, ecx
 	ret
 dispcr endp
 endif
@@ -873,7 +830,7 @@ nextdevice:
 	test [ebx].HDAREGS.gctl,1
 	jnz hda_running
 	or [ebx].HDAREGS.gctl,1
-	mov ecx,80000h
+	mov ecx,10000h
 @@:
 	call dowait
 	test [ebx].HDAREGS.gctl, 1
@@ -903,6 +860,13 @@ endif
 ;--- reset CORB, RIRB
 
 	and [ebx].HDAREGS.corbctl,not 2
+	and [ebx].HDAREGS.rirbctl,not 2
+	mov ecx,10000h
+@@:
+	call dowait
+	test byte ptr [ebx].HDAREGS.corbctl,2
+	loopnz @B
+
 	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
 
 ;--- to reset the CORB RP, first set bit 15 to 1, then back to 0
