@@ -375,6 +375,10 @@ pinnode_found:
 		invoke sendcmd, ebx, codec, si, 0002h, wFormat;set converter format
 		;--- set stream & start channel - stream is in [7:4], start channel in [3:0]
 		invoke sendcmd, ebx, codec, si, 0706h, ?STREAM shl 4 or ?CHANNEL
+	.else
+		invoke printf, CStr("codec %u: no audio output converter connected to lineout pin",lf), codec
+		mov pinnode,0
+		jmp exit
 	.endif
 	invoke sendcmd, ebx, codec, pinnode, 0705h, 0	;set power state
 	invoke sendcmd, ebx, codec, pinnode, 0003h, 0F040h;set amplifier
