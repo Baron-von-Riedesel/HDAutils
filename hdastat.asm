@@ -122,26 +122,16 @@ int_1a endp
 
 ;--- wait a bit
 
-dowait proc uses eax ecx edx
+dowait proc uses eax ecx
 
-	mov dh,2
+	mov ecx,100h
 nextloop:
 	in al,61h
 	and al,10h
-	mov dl,al
-	mov ecx,10000h
-@@:
-	mov ax,1680h
-	int 2Fh
-	cmp al,80h
-	jnz @F
-	in al,61h
-	and al,10h
-	cmp al,dl
-	loopnz @B
-@@:
-	dec dh
-	jnz nextloop
+	cmp al,ah
+	mov ah,al
+	jz nextloop
+	loop nextloop
 	ret
 dowait endp
 

@@ -128,26 +128,16 @@ mapphys endp
 
 ;--- wait a bit
 
-dowait proc uses eax ecx edx
+dowait proc uses eax ecx
 
-	mov dh,2
+	mov ecx,100h
 nextloop:
 	in al,61h
 	and al,10h
-	mov dl,al
-	mov ecx,10000h
-@@:
-	mov ax,1680h
-	int 2Fh
-	cmp al,80h
-	jnz @F
-	in al,61h
-	and al,10h
-	cmp al,dl
-	loopnz @B
-@@:
-	dec dh
-	jnz nextloop
+	cmp al,ah
+	mov ah,al
+	jz nextloop
+	loop nextloop
 	ret
 dowait endp
 
@@ -209,6 +199,9 @@ endif
 	ret
 sendcmd endp
 
+;--- check connections of a widget, recursively,
+;--- until an "audio output converter" is found
+
 checkconn proc uses esi edi codec:dword, node:word, wtype:word
 
 local nConn:dword
@@ -228,7 +221,7 @@ local currConn:dword
 		invoke sendcmd, ebx, codec, si, 0F00h, 9	;get widgettype
 		shld ecx, eax, 12
 		and ecx,0fh
-		.if ecx == WTYPE_AUDIOOUT
+		.if ecx == WTYPE_AUDIOOUT	;audio output converter found?
 			invoke sendcmd, ebx, codec, si, 0705h, 0	;set power state
 			invoke sendcmd, ebx, codec, si, 0003h, 0B040h;set amplifier
 			.break
@@ -240,6 +233,8 @@ local currConn:dword
 		shr eax,8
 		inc edi
 	.endw
+	;--- if audio output converter was found in this path,
+	;--- activate the widget (mixer, selector) and "unmute" it.
 	.if edi < nConn
 		.if nConn > 1 && wtype != WTYPE_MIXER
 			invoke sendcmd, ebx, codec, node, 0701h, di	;select connection
