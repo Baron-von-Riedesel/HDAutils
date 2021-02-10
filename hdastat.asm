@@ -362,14 +362,17 @@ local rmcs:RMCS
 	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
 
 ;--- to reset the CORB RP, first set bit 15 to 1, then back to 0.
-;--- this often doesn't work.
+;--- this often doesn't work, so skip wait if corbrp == 0
 
 	or byte ptr [ebx].HDAREGS.corbrp+1,80h	;reset CORB RP
 	mov ecx,10000h
 @@:
 	call dowait
+	cmp [ebx].HDAREGS.corbrp,0
+	jz @F
 	test byte ptr [ebx].HDAREGS.corbrp+1,80h
 	loopz @B
+@@:
 	and byte ptr [ebx].HDAREGS.corbrp+1,7fh
 	mov ecx,10000h
 @@:

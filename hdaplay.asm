@@ -65,6 +65,7 @@ wDevice dw 0
 
 bQuiet  db 0	;-q option
 bReset  db 0	;-r option
+bDefDev  db DEFDEV_LINEOUT	;-s option
 bVerbose db 0	;-v option
 
 if ?SHELL
@@ -73,6 +74,9 @@ cmdl	db 0,13
 endif
 
 	.CODE
+
+defdevices label dword
+	dd CStr("lineout"), CStr("speaker"), CStr("headphone")
 
 	include printf.inc
 
@@ -247,7 +251,7 @@ local currConn:dword
 
 checkconn endp
 
-;--- get "line out" pin widget
+;--- get "lineout", "speaker" or "headphone" pin widget
 ;--- and search a path to corresponding "audio output" widget
 
 searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, device:dword, codec:dword, wFormat:word
@@ -255,7 +259,6 @@ searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, device:dword, codec:dword, 
 local startnode:dword
 local numnodes:dword
 local afgnode:word
-;local hppinnode:word
 local pinnode:word
 
 ;--- get start of root nodes
@@ -292,7 +295,6 @@ local pinnode:word
 	mov esi, edx
 	mov startnode, esi
 	mov numnodes, edi
-;	mov hppinnode,0
 
 ;--- pin set with -w option?
 	mov ax,wWidget
@@ -315,7 +317,7 @@ local pinnode:word
 		.endif
 	.endif
 
-;--- scan afg widgets, searching "lineout" and "headphone" pins
+;--- scan afg widgets, searching "lineout", "speaker" and "headphone" pins
 
 	.while edi
 		invoke sendcmd, ebx, codec, si, 0F00h, 9	;get widgettype
@@ -328,20 +330,15 @@ local pinnode:word
 			mov edx,eax
 			shr edx,12
 			and edx,0fh
-			.if ecx == 0
-				.if pinnode == 0 || edx == 4 ;color green?
+			.if cl == bDefDev
+				;--- if more than one lineout exist, prefer the one with color green (=4)!
+				.if pinnode == 0 || ( cl == DEFDEV_LINEOUT && edx == 4 )
 					mov pinnode, si
 					.if !bQuiet
-						invoke printf, CStr("codec %u, lineout pin widget: %u",lf), codec, esi
+						mov ecx,[ecx*4+offset defdevices]
+						invoke printf, CStr("codec %u, %s pin widget: %u",lf), codec, ecx, esi
 					.endif
 				.endif
-if 0
-			.elseif ecx == 2
-				.if !bQuiet
-					invoke printf, CStr("codec %u, headphone pin widget: %u",lf), codec, esi
-				.endif
-				mov hppinnode, si
-endif
 			.endif
 		.endif
 		inc esi
@@ -350,7 +347,7 @@ endif
 
 pinnode_found:
 
-;--- without a (lineout) pin, there's nothing to do
+;--- without a (lineout/speaker/headphone) pin, there's nothing to do
 	cmp pinnode,0
 	jz exit
 
@@ -359,7 +356,7 @@ pinnode_found:
 		invoke sendcmd, ebx, codec, afgnode, 7ffh, 0	;reset afg
 	.endif
 
-;--- check connections of (lineout) pin to find audio output converter
+;--- check connections of pin to find audio output converter
 
 	invoke checkconn, codec, pinnode, WTYPE_PIN
 	.if eax
@@ -371,7 +368,9 @@ pinnode_found:
 		;--- set stream & start channel - stream is in [7:4], start channel in [3:0]
 		invoke sendcmd, ebx, codec, si, 0706h, ?STREAM shl 4 or ?CHANNEL
 	.else
-		invoke printf, CStr("codec %u: no audio output converter connected to lineout pin",lf), codec
+		movzx ecx, bDefDev
+		mov ecx,[ecx*4+offset defdevices]
+		invoke printf, CStr("codec %u: no audio output converter connected to %s pin",lf), codec, ecx
 		mov pinnode,0
 		jmp exit
 	.endif
@@ -795,7 +794,7 @@ local rmcs:RMCS
 	mov dword ptr [eax+sizeof BDLENTRY].BDLENTRY.dwLen, ecx
 	mov dword ptr [eax+sizeof BDLENTRY].BDLENTRY.dwFlgs, 0
 
-;--- find HDA device(s) that have a "lineout" pin.
+;--- find HDA device(s) that have a lineout/speaker/headphone pin.
 ;--- expect to find more than one HDA controller - HDMI 
 ;--- video output may have it's own controller/codec.
 
@@ -809,7 +808,9 @@ nextdevice:
 		.if currdevice == 0
 			invoke printf, CStr("no HDA device found",lf)
 		.elseif bQuiet
-			invoke printf, CStr("no HDA device with lineout pin found",lf)
+			movzx ecx,bDefDev
+			mov ecx,[ecx*4+offset defdevices]
+			invoke printf, CStr("no HDA device with %s pin found",lf), ecx
 		.endif
 		jmp exit
 	.endif
@@ -872,13 +873,16 @@ endif
 ;--- seems not to work on many? machines, so do with timeout.
 
 	or byte ptr [ebx].HDAREGS.corbrp+1,80h	;reset CORB RP
-	mov ecx,10000h
+	mov ecx,1000h
 @@:
 	call dowait
+	cmp [ebx].HDAREGS.corbrp,0	;skip wait if corbrp == 0
+	jz @F
 	test byte ptr [ebx].HDAREGS.corbrp+1,80h
 	loopz @B
+@@:
 	and byte ptr [ebx].HDAREGS.corbrp+1,7fh
-	mov ecx,10000h
+	mov ecx,1000h
 @@:
 	call dowait
 	test byte ptr [ebx].HDAREGS.corbrp+1,80h
@@ -900,7 +904,7 @@ if ?DISPCR
 endif
 
 ;--- scan STATESTS for attached codecs;
-;--- search the codec's lineout pin.
+;--- search the codec's lineout/speaker/headphone pin.
 
 	mov esi,0
 	movzx ecx, [ebx].HDAREGS.statests
@@ -920,7 +924,9 @@ endif
 	.endif
 	.if !eax
 		.if !bQuiet
-			invoke printf, CStr("no lineout pin found for this device",lf)
+			movzx ecx,bDefDev
+			mov ecx,[ecx*4+offset defdevices]
+			invoke printf, CStr("no %s pin found for this device",lf), ecx
 		.endif
 		;--- stop CORB and RIRB DMA engines
 		call stopcr
@@ -929,7 +935,7 @@ endif
 		jmp nextdevice
 	.endif
 
-;--- a HDA with lineout pin has been found
+;--- a HDA with lineout/speaker/headphone pin has been found
 
 ;--- reset first output stream
 ;--- first, position EDI to the first output stream
@@ -1107,7 +1113,7 @@ error:
 	ret
 getwidget endp
 
-;--- find a path to lineout and stream a .wav file
+;--- find a path to lineout/speaker/headphone and stream a .wav file
 
 main proc c argc:dword,argv:dword
 
@@ -1128,6 +1134,8 @@ local pszFN:dword
 				or bQuiet, 1
 			.elseif ah == 'r'
 				or bReset, 1
+			.elseif ah == 's'
+				or bDefDev, DEFDEV_SPEAKER
 			.elseif ah == 'v'
 				or bVerbose, 1
 			.elseif ah == 'w'
@@ -1174,6 +1182,7 @@ usage:
 	invoke printf, CStr("options:",lf)
 	invoke printf, CStr("  -q : quiet (means: no displays)",lf)
 	invoke printf, CStr("  -r : reset Audio Function Group",lf)
+	invoke printf, CStr("  -s : use speaker instead of lineout widget",lf)
 	invoke printf, CStr("  -v : more displays",lf)
 	invoke printf, CStr("  -w<p[,c,d]>: set pin widget, p=pin, c=codec, d=device",lf)
 	ret

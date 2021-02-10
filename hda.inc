@@ -136,3 +136,10 @@ WTYPE_POWER		equ 5
 WTYPE_VOLKNOB	equ 6
 WTYPE_BEEPGEN	equ 7
 
+;--- pin default device types
+
+DEFDEV_LINEOUT equ 0
+DEFDEV_SPEAKER equ 1
+DEFDEV_HEADPHONE equ 2
+
+
