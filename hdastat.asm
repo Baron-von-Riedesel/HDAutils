@@ -7,6 +7,7 @@
 	option proc:private
 
 ?LOGCODEC equ 0
+?SENDNULL equ 0
 
 lf	equ 10
 
@@ -342,6 +343,16 @@ local rmcs:RMCS
 
 	mov ebx, pHDA
 
+;--- reset CORB, RIRB
+
+	and [ebx].HDAREGS.corbctl,not 2
+	and [ebx].HDAREGS.rirbctl,not 2
+	mov ecx,1000h
+@@:
+	call dowait
+	test [ebx].HDAREGS.corbctl,2
+	loopnz @B
+
 ;--- init CORB & RIRB ring buffers
 
 	mov edi, dwXMSPhys
@@ -356,16 +367,15 @@ local rmcs:RMCS
 	mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
 	mov pRirb, eax
 
-;--- reset CORB, RIRB
-
-	and [ebx].HDAREGS.corbctl,not 2
 	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
+	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
+	mov [ebx].HDAREGS.rirbric,1		;interrupt after 1 response
 
 ;--- to reset the CORB RP, first set bit 15 to 1, then back to 0.
 ;--- this often doesn't work, so skip wait if corbrp == 0
 
 	or byte ptr [ebx].HDAREGS.corbrp+1,80h	;reset CORB RP
-	mov ecx,10000h
+	mov ecx,1000h
 @@:
 	call dowait
 	cmp [ebx].HDAREGS.corbrp,0
@@ -374,20 +384,29 @@ local rmcs:RMCS
 	loopz @B
 @@:
 	and byte ptr [ebx].HDAREGS.corbrp+1,7fh
-	mov ecx,10000h
+	mov ecx,1000h
 @@:
 	call dowait
 	test byte ptr [ebx].HDAREGS.corbrp+1,80h
 	loopnz @B
 
-	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
-	mov [ebx].HDAREGS.rirbric,1		;interrupt after 1 response
-
 ;--- start DMA engines for CORB and RIRB
 
 	or [ebx].HDAREGS.corbctl,2
 	or [ebx].HDAREGS.rirbctl,2
-
+	mov ecx,1000h
+@@:
+	call dowait
+	test [ebx].HDAREGS.corbctl,2
+	loopz @B
+if ?SENDNULL
+	xor eax,eax
+	mov ecx, pCorb
+	movzx edx,[ebx].HDAREGS.corbwp
+	inc dl
+	mov [ecx+edx*4], eax
+	mov [ebx].HDAREGS.corbwp, dx
+endif
 
 	invoke printf, CStr(lf,"codec/node/cmd/param: value",lf)
 	invoke printf, CStr("-----------------------------------------------",lf)

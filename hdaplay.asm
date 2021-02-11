@@ -11,6 +11,7 @@
 	option proc:private
 
 ?LOGCODEC equ 0	;1 for debugging
+?SENDNULL equ 0	;1 send NULL verb after CORB init
 ?STREAM   equ 1	;stream # to use
 ?CHANNEL  equ 0	;channel start # to use
 ?DISPCR   equ 1	;1 display corb/rirp status
@@ -183,7 +184,7 @@ if ?LOGCODEC
 	loopnz @B
 	pop eax
 	.if ecx
-		invoke printf, CStr("sendcmd: cmd %X send, waiting for response",lf), eax
+		invoke printf, CStr("sendcmd: cmd %X send, waiting for response, rirbwp=%X",lf), eax, si
 	.else
 		invoke printf, CStr("sendcmd: timeout waiting for cmd %X to be sent",lf), eax
 	.endif
@@ -841,15 +842,6 @@ nextdevice:
 	.endif
 hda_running:
 
-;--- init CORB & RIRB ring buffers
-
-	mov edx, dwXMSPhys1
-	mov dword ptr [ebx].HDAREGS.corbbase+0, edx
-	mov dword ptr [ebx].HDAREGS.corbbase+4, 0
-	add edx, 256*4
-	mov dword ptr [ebx].HDAREGS.rirbbase+0, edx
-	mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
-
 if ?DISPCR
 	.if bVerbose
 		invoke printf, CStr(lf,"CORB/RIRB before init",lf)
@@ -861,13 +853,24 @@ endif
 
 	and [ebx].HDAREGS.corbctl,not 2
 	and [ebx].HDAREGS.rirbctl,not 2
-	mov ecx,10000h
+	mov ecx,1000h
 @@:
 	call dowait
-	test byte ptr [ebx].HDAREGS.corbctl,2
+	test [ebx].HDAREGS.corbctl,2
 	loopnz @B
 
+;--- set CORB & RIRB ring buffers
+
+	mov edx, dwXMSPhys1
+	mov dword ptr [ebx].HDAREGS.corbbase+0, edx
+	mov dword ptr [ebx].HDAREGS.corbbase+4, 0
+	add edx, 256*4
+	mov dword ptr [ebx].HDAREGS.rirbbase+0, edx
+	mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
+
 	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
+	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
+	mov [ebx].HDAREGS.rirbric,1		;interrupt after 1 response
 
 ;--- to reset the CORB RP, first set bit 15 to 1, then back to 0
 ;--- seems not to work on many? machines, so do with timeout.
@@ -888,13 +891,23 @@ endif
 	test byte ptr [ebx].HDAREGS.corbrp+1,80h
 	loopnz @B
 
-	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
-	mov [ebx].HDAREGS.rirbric,1		;interrupt after 1 response
-
 ;--- start DMA engines for CORB and RIRB
 
 	or [ebx].HDAREGS.corbctl,2
 	or [ebx].HDAREGS.rirbctl,2
+	mov ecx,1000h
+@@:
+	call dowait
+	test [ebx].HDAREGS.corbctl,2
+	loopz @B
+if ?SENDNULL
+	xor eax,eax
+	mov ecx, pCorb
+	movzx edx,[ebx].HDAREGS.corbwp
+	inc dl
+	mov [ecx+edx*4], eax
+	mov [ebx].HDAREGS.corbwp, dx
+endif
 
 if ?DISPCR
 	.if bVerbose
