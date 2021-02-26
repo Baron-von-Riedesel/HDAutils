@@ -58,6 +58,8 @@ WAVEFMT ends
 rmstack dd ?	;real-mode stack ( PCI int 1Ah wants 1 kB stack space )
 pCorb   dd ?	;linear address CORB
 pRirb   dd ?	;linear address RIRB
+pMemRg1 dd 0
+pMemRg2 dd 0
 
 ;--- wWidget, wCodec and wDevice must be consecutive!
 wWidget dw 0	;-w option
@@ -118,16 +120,36 @@ int_1a endp
 
 ;--- map physical memory block into linear memory
 
-mapphys proc uses ebx esi edi dwPhysBase:dword, dwSize:dword
-	mov cx,word ptr dwPhysBase+0
-	mov bx,word ptr dwPhysBase+2
-	mov di,word ptr dwSize+0
-	mov si,word ptr dwSize+2
-	mov ax,0800h
-	int 31h
-	push bx
-	push cx
-	pop eax
+mapphys proc uses ebx esi edi pLinear:dword, dwPhysBase:dword, dwSize:dword
+
+	.if pLinear
+		mov esi,pLinear
+		xor ebx,ebx
+		mov edx,dwPhysBase
+		mov ecx,dwSize
+		mov eax,edx
+		and eax,0FFFh
+		and dx,0F000h
+		add ecx,eax
+		push eax
+		add ecx,1000h-1
+		shr ecx,12
+		mov ax,508h
+		int 31h
+		pop ecx
+		mov eax,pLinear
+		lea eax,[eax+ecx]
+	.else
+		mov cx,word ptr dwPhysBase+0
+		mov bx,word ptr dwPhysBase+2
+		mov di,word ptr dwSize+0
+		mov si,word ptr dwSize+2
+		mov ax,0800h
+		int 31h
+		push bx
+		push cx
+		pop eax
+	.endif
 	ret
 mapphys endp
 
@@ -739,12 +761,19 @@ local rmcs:RMCS
 
 ;--- map the block into linear memory so it can be accessed
 
-	invoke mapphys, dwXMSPhys1, 1024 * 4
+	invoke mapphys, pMemRg2, dwXMSPhys1, 1024 * 4
 	jc exit
-	mov pCorb, eax
-	add eax, 256*4
-	mov pRirb, eax
-	add eax, 256*8
+	.if ax & 400h
+		mov pCorb, eax
+		add eax, 256*4
+		mov pRirb, eax
+		add eax, 256*8
+	.else
+		mov pRirb, eax
+		add eax, 256*8
+		mov pCorb, eax
+		add eax, 256*4
+	.endif
 	mov pBDL, eax
 
 ;--- allocate second XMS block for samples
@@ -821,7 +850,7 @@ nextdevice:
 		jmp exit
 	.endif
 
-	invoke mapphys, eax, 1000h	;map the HDA registers into linear address space
+	invoke mapphys, pMemRg1, eax, 1000h	;map the HDA registers into linear address space
 	jc exit
 	mov pHDALin, eax
 
@@ -862,11 +891,19 @@ endif
 ;--- set CORB & RIRB ring buffers
 
 	mov edx, dwXMSPhys1
-	mov dword ptr [ebx].HDAREGS.corbbase+0, edx
-	mov dword ptr [ebx].HDAREGS.corbbase+4, 0
-	add edx, 256*4
-	mov dword ptr [ebx].HDAREGS.rirbbase+0, edx
-	mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
+	.if dx & 400h
+		mov dword ptr [ebx].HDAREGS.corbbase+0, edx
+		mov dword ptr [ebx].HDAREGS.corbbase+4, 0
+		add edx, 256*4
+		mov dword ptr [ebx].HDAREGS.rirbbase+0, edx
+		mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
+	.else
+		mov dword ptr [ebx].HDAREGS.rirbbase+0, edx
+		mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
+		add edx, 256*8
+		mov dword ptr [ebx].HDAREGS.corbbase+0, edx
+		mov dword ptr [ebx].HDAREGS.corbbase+4, 0
+	.endif
 
 	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
 	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
@@ -986,7 +1023,7 @@ endif
 ;--- the HDA is ready to start the DMA process
 ;--- map memory for samples in address space, read samples, and unmap buffer 
 
-	invoke mapphys, dwXMSPhys2, datahdr.subchkSiz
+	invoke mapphys, 0, dwXMSPhys2, datahdr.subchkSiz
 	jc exit
 	mov edx, eax
 	push eax
@@ -1175,6 +1212,25 @@ local pszFN:dword
 	jc exit
 	mov word ptr rmstack+0,400h
 	mov word ptr rmstack+2,ax
+
+;--- allocate 2 uncommitted regions;
+;--- will be used to map HDA controller and CORB/RIRB
+	xor ebx,ebx
+	mov ecx,2000h
+	xor edx,edx
+	mov ax,504h
+	int 31h
+	jc @F
+	mov pMemRg1,ebx
+@@:
+	xor ebx,ebx
+	mov ecx,2000h
+	xor edx,edx
+	mov ax,504h
+	int 31h
+	jc @F
+	mov pMemRg2,ebx
+@@:
 
 	xor edi,edi
 	mov ax,0B101h

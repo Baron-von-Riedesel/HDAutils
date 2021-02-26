@@ -8,6 +8,7 @@
 
 ?LOGCODEC equ 0
 ?SENDNULL equ 0
+?HDCTL    equ 0	;display PCI register 0x40 (Intel ICH, bit 0: 0=AC97, 1=HDA)
 
 lf	equ 10
 
@@ -43,6 +44,8 @@ endm
 rmstack dd ?	;real-mode stack ( PCI int 1Ah wants 1 kB stack space )
 pCorb   dd ?	;linear address CORB
 pRirb   dd ?	;linear address RIRB
+pMemRg1 dd 0
+pMemRg2 dd 0
 bVerbose db 0
 bReset db 0
 bActiveOnly db 0
@@ -244,17 +247,38 @@ bittab db 8,16,20,24,32,-1,-1,-1
 translateformat endp
 
 ;--- map physical memory block into linear memory
+;--- dwPhysBase: physical address
+;--- dwSize: size in bytes
 
-mapphys proc uses ebx esi edi dwPhysBase:dword, dwSize:dword
-	mov cx,word ptr dwPhysBase+0
-	mov bx,word ptr dwPhysBase+2
-	mov di,word ptr dwSize+0
-	mov si,word ptr dwSize+2
-	mov ax,0800h
-	int 31h
-	push bx
-	push cx
-	pop eax
+mapphys proc uses ebx esi edi pLinear:dword, dwPhysBase:dword, dwSize:dword
+	.if pLinear
+		mov esi,pLinear
+		xor ebx,ebx
+		mov edx,dwPhysBase
+		mov ecx,dwSize
+		mov eax,edx
+		and eax,0FFFh
+		and dx,0F000h
+		add ecx,eax
+		push eax
+		add ecx,1000h-1
+		shr ecx,12
+		mov ax,508h
+		int 31h
+		pop ecx
+		mov eax,pLinear
+		lea eax,[eax+ecx]
+	.else
+		mov cx,word ptr dwPhysBase+0
+		mov bx,word ptr dwPhysBase+2
+		mov di,word ptr dwSize+0
+		mov si,word ptr dwSize+2
+		mov ax,800h
+		int 31h
+		push bx
+		push cx
+		pop eax
+	.endif
 	ret
 mapphys endp
 
@@ -306,7 +330,7 @@ local rmcs:RMCS
 	mov rmcs.rIP,bx
 
 ;--- allocate (& lock) XMS memory
-;--- the block is for CORB & RIRB (1024+2048
+;--- the block is for CORB & RIRB (1024+2048)
 
 	mov rmcs.rAX,8900h
 	mov rmcs.rEDX,3
@@ -337,7 +361,7 @@ local rmcs:RMCS
 
 ;--- map the block into linear memory so it can be accessed
 
-	invoke mapphys, dwXMSPhys, 1024 * 3
+	invoke mapphys, pMemRg2, dwXMSPhys, 1024 * 3
 	jc exit
 	mov pXMSLin, eax
 
@@ -354,18 +378,32 @@ local rmcs:RMCS
 	loopnz @B
 
 ;--- init CORB & RIRB ring buffers
+;--- its aligned to 1 kB, but to be save,
+;--- ensure that the RIRB is 2kB-aligned.
 
 	mov edi, dwXMSPhys
 	mov eax, pXMSLin
-	mov dword ptr [ebx].HDAREGS.corbbase+0, edi
-	mov dword ptr [ebx].HDAREGS.corbbase+4, 0
-	mov pCorb, eax
-	mov ecx, 256*4
-	add eax, ecx
-	add edi, ecx
-	mov dword ptr [ebx].HDAREGS.rirbbase+0, edi
-	mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
-	mov pRirb, eax
+	.if ax & 400h
+		mov dword ptr [ebx].HDAREGS.corbbase+0, edi
+		mov dword ptr [ebx].HDAREGS.corbbase+4, 0
+		mov pCorb, eax
+		mov ecx, 256*4
+		add eax, ecx
+		add edi, ecx
+		mov dword ptr [ebx].HDAREGS.rirbbase+0, edi
+		mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
+		mov pRirb, eax
+	.else
+		mov dword ptr [ebx].HDAREGS.rirbbase+0, edi
+		mov dword ptr [ebx].HDAREGS.rirbbase+4, 0
+		mov pRirb, eax
+		mov ecx, 256*8
+		add eax, ecx
+		add edi, ecx
+		mov dword ptr [ebx].HDAREGS.corbbase+0, edi
+		mov dword ptr [ebx].HDAREGS.corbbase+4, 0
+		mov pCorb, eax
+	.endif
 
 	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
 	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
@@ -399,6 +437,12 @@ local rmcs:RMCS
 	call dowait
 	test [ebx].HDAREGS.corbctl,2
 	loopz @B
+
+	.if bVerbose
+		invoke printf, CStr(lf,"CORB/RIRB after init:",lf)
+		call dispcr
+	.endif
+
 if ?SENDNULL
 	xor eax,eax
 	mov ecx, pCorb
@@ -695,12 +739,25 @@ timeout:
 
 dispcodec endp
 
+dispcr proc
+	invoke printf, CStr("    +64 CORB base address=0x%lX",lf), [ebx].HDAREGS.corbbase
+	invoke printf, CStr("    +72 CORB WP=0x%X, RP=0x%X",lf), [ebx].HDAREGS.corbwp,[ebx].HDAREGS.corbrp
+	invoke printf, CStr("    +76 CORB control=0x%X ([1] 0=DMA Stop, 1=DMA Run)",lf), [ebx].HDAREGS.corbctl
+	invoke printf, CStr("    +78 CORB size=0x%X ([7:4] size cap [bitmask],[1:0] size [0=2,1=16,2=256,3=rsvd])",lf), [ebx].HDAREGS.corbsize
+	invoke printf, CStr("    +80 RIRB base address=0x%lX",lf), [ebx].HDAREGS.rirbbase
+	invoke printf, CStr("    +88 RIRB WP=0x%X, RIC=0x%X",lf), [ebx].HDAREGS.rirbwp,[ebx].HDAREGS.rirbric
+	invoke printf, CStr("    +92 RIRB control=0x%X ([1] 0=DMA Stop, 1=DMA Run)",lf), [ebx].HDAREGS.rirbctl
+	invoke printf, CStr("    +94 RIRB size=0x%X ([7:4] size cap [bitmask],[1:0] size [0=2,1=16,2=256,3=rsvd])",lf), [ebx].HDAREGS.rirbsize
+	ret
+dispcr endp
+
 ;--- display HDA controller's memory-mapped registers
 
 displayhdamem proc uses ebx esi edi dwLinAddr:dword, dwPhysBase:dword
 
 local istreams:dword
 local ostreams:dword
+local bistreams:dword
 
 	mov ebx, dwLinAddr
 
@@ -724,15 +781,18 @@ local ostreams:dword
 	invoke printf, CStr("    +0  Global Capabilities=0x%X",lf), eax
 	pop eax
 	movzx ecx,al
-	shr ecx,1
+	movzx esi,al
+	shr ecx,1	;bits 2:1 NSDO - number of serial data out signals
 	and cl,3
+	shr esi,3	;bits 7:3 BSS - number of bidirectional streams supported
 	shr eax,8
 	movzx edx, al
-	shr edx,4
-	and al,0Fh
+	shr edx,4	;bits 15:12 OSS - number of output streams supported
+	and al,0Fh	;bits 11:8 ISS - number of input streams supported
 	mov istreams,eax
 	mov ostreams,edx
-	invoke printf, CStr("        #input streams=%u, #output streams=%u, #SDO=%u (0=1,1=2,2=4)",lf), eax, edx, ecx
+	mov bistreams,esi
+	invoke printf, CStr("        #input streams=%u, #output streams=%u, #bidirect. streams=%u, #SDO=%u (0=1,1=2,2=4)",lf), eax, edx, esi, ecx
 	movzx eax,[ebx].HDAREGS.vminor
 	movzx ecx,[ebx].HDAREGS.vmajor
 	invoke printf, CStr("    +2  Version=%u.%u",lf), ecx, eax
@@ -750,14 +810,7 @@ local ostreams:dword
 	invoke printf, CStr("    +48 WALCLK - Wall Clock Counter=0x%X",lf), [ebx].HDAREGS.walclk
 	invoke printf, CStr("    +56 SSYNC - Stream Synchronization=0x%X",lf), [ebx].HDAREGS.ssync
 
-	invoke printf, CStr("    +64 CORB base address=0x%lX",lf), [ebx].HDAREGS.corbbase
-	invoke printf, CStr("    +72 CORB WP=0x%X, RP=0x%X",lf), [ebx].HDAREGS.corbwp,[ebx].HDAREGS.corbrp
-	invoke printf, CStr("    +76 CORB control=0x%X ([1] 0=DMA Stop, 1=DMA Run)",lf), [ebx].HDAREGS.corbctl
-	invoke printf, CStr("    +78 CORB size=0x%X ([7:4] size cap [bitmask],[1:0] size [0=2,1=16,2=256,3=rsvd])",lf), [ebx].HDAREGS.corbsize
-	invoke printf, CStr("    +80 RIRB base address=0x%lX",lf), [ebx].HDAREGS.rirbbase
-	invoke printf, CStr("    +88 RIRB WP=0x%X, RIC=0x%X",lf), [ebx].HDAREGS.rirbwp,[ebx].HDAREGS.rirbric
-	invoke printf, CStr("    +92 RIRB control=0x%X ([1] 0=DMA Stop, 1=DMA Run)",lf), [ebx].HDAREGS.rirbctl
-	invoke printf, CStr("    +94 RIRB size=0x%X ([7:4] size cap [bitmask],[1:0] size [0=2,1=16,2=256,3=rsvd])",lf), [ebx].HDAREGS.rirbsize
+	call dispcr
 
 	.if bVerbose
 		invoke printf, CStr("    Immediate command=0x%X",lf), [ebx].HDAREGS.ic
@@ -857,16 +910,8 @@ local dwPhysBase:dword
 		jmp exit
 	.endif
 	invoke printf, CStr(lf,"  HDA Base Address=0x%X",lf), dwPhysBase
-	mov cx,word ptr dwPhysBase+0
-	mov bx,word ptr dwPhysBase+2
-	mov si,0000h
-	mov di,1000h
-	mov ax,0800h
-	int 31h
+	invoke mapphys, pMemRg1, dwPhysBase, 1000h
 	jc exit
-	push bx
-	push cx
-	pop eax
 	invoke displayhdamem, eax, dwPhysBase
 exit:
 	ret
@@ -941,12 +986,12 @@ endif
 		movzx eax,cl
 		invoke printf, CStr("  interrupt line=%u",lf), eax
 	.endif
-if 0
+if ?HDCTL
 	mov edi,40h
 	mov ax,0B10Ah
 	call int_1a
 	.if ah == 0
-		invoke printf, CStr("  register 40h=0x%X",lf), ecx
+		invoke printf, CStr("  HDCTL - register 40h=0x%X",lf), ecx
 	.endif
 endif
 	.if dwClass == 040300h
@@ -993,6 +1038,25 @@ main proc c argc:dword,argv:dword
 
 local dwClass:dword
 local pszType:dword
+
+;--- allocate 2 uncommitted regions;
+;--- will be used to map HDA controller and CORB/RIRB
+	xor ebx,ebx
+	mov ecx,2000h
+	xor edx,edx
+	mov ax,504h
+	int 31h
+	jc @F
+	mov pMemRg1,ebx
+@@:
+	xor ebx,ebx
+	mov ecx,2000h
+	xor edx,edx
+	mov ax,504h
+	int 31h
+	jc @F
+	mov pMemRg2,ebx
+@@:
 
 	mov esi, argc
 	mov ebx,argv
