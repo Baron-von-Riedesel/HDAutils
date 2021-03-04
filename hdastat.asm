@@ -44,8 +44,11 @@ endm
 rmstack dd ?	;real-mode stack ( PCI int 1Ah wants 1 kB stack space )
 pCorb   dd ?	;linear address CORB
 pRirb   dd ?	;linear address RIRB
-pMemRg1 dd 0
-pMemRg2 dd 0
+dwPhysBlk dd ?	;physical address XMS block for CORB/RIRB
+pLinBlk dd ?	;linear address XMS block for CORB/RIRB
+dwXMS   dd ?	;XMS driver entry
+pMemRg1 dd 0	;linear address for region 1 ( used to map in HDA controller )
+xmshdl  dw 0
 bVerbose db 0
 bReset db 0
 bActiveOnly db 0
@@ -282,23 +285,9 @@ mapphys proc uses ebx esi edi pLinear:dword, dwPhysBase:dword, dwSize:dword
 	ret
 mapphys endp
 
-;--- display codec, nodes and widgets
+AllocXMS proc uses edi ebx dwSize:dword
 
-dispcodec proc uses ebx esi edi pHDA:ptr HDAREGS, codec:dword
-
-local btype:byte
-local afgnode:word
-local wflags:word
-local startnode:dword
-local numnodes:dword
-local cConn:dword
-local dwXMSPhys:dword
-local pXMSLin:dword
-local xmshdl:word
 local rmcs:RMCS
-
-	mov afgnode,0
-	mov xmshdl,0
 
 ;--- find XMM entry point.
 ;--- using XMS memory, since physical addresses are needed.
@@ -316,7 +305,7 @@ local rmcs:RMCS
 	mov eax,rmcs.rEAX
 	.if al != 80h
 		invoke printf, CStr("no XMM found",lf)
-		jmp exit
+		jmp error
 	.endif
 	mov rmcs.rAX,4310h
 	mov ax,0300h
@@ -324,10 +313,11 @@ local rmcs:RMCS
 
 ;--- copy XMS entry point to rmcs.CS:IP
 
-	mov ax,rmcs.rES
-	mov bx,rmcs.rBX
-	mov rmcs.rCS,ax
-	mov rmcs.rIP,bx
+	push rmcs.rES
+	push rmcs.rBX
+	pop eax
+	mov rmcs.rCSIP,eax
+	mov dwXMS,eax
 
 ;--- allocate (& lock) XMS memory
 ;--- the block is for CORB & RIRB (1024+2048)
@@ -339,7 +329,7 @@ local rmcs:RMCS
 	int 31h
 	.if rmcs.rAX != 1
 		invoke printf, CStr("XMS memory allocation failed",lf)
-		jmp exit
+		jmp error
 	.endif
 	mov ax,rmcs.rDX
 	mov xmshdl,ax
@@ -349,21 +339,62 @@ local rmcs:RMCS
 	int 31h
 	.if rmcs.rAX != 1
 		invoke printf, CStr("XMS memory lock failed",lf)
-		jmp exit
+		jmp error
 	.endif
 	mov ax,rmcs.rDX
 	shl eax,16
 	mov ax,rmcs.rBX
-	mov dwXMSPhys,eax
+	push eax
 	.if bVerbose
 		invoke printf, CStr(lf,"EMB physical address=%X, used for CORB & RIRB",lf), eax
 	.endif
+	pop eax
+	clc
+	ret
+error:
+	stc
+	ret
 
-;--- map the block into linear memory so it can be accessed
+AllocXMS endp
 
-	invoke mapphys, pMemRg2, dwXMSPhys, 1024 * 3
-	jc exit
-	mov pXMSLin, eax
+FreeXMS proc
+
+local rmcs:RMCS
+
+	mov ax,xmshdl
+	.if ax
+		mov rmcs.rDX,ax
+		mov rmcs.rAX,0D00h	;unlock XMS block
+		mov rmcs.rFlags,3202h
+		mov eax, dwXMS
+		mov rmcs.rCSIP,eax
+		mov rmcs.rSSSP,0
+		lea edi,rmcs
+		mov bx,0
+		mov cx,0
+		mov ax,0301h
+		int 31h
+		mov rmcs.rAX,0A00h	;free XMS block
+		mov bx,0
+		mov cx,0
+		mov ax,0301h
+		int 31h
+	.endif
+	ret
+FreeXMS endp
+
+;--- display codec, nodes and widgets
+
+dispcodec proc uses ebx esi edi pHDA:ptr HDAREGS, codec:dword
+
+local btype:byte
+local afgnode:word
+local wflags:word
+local startnode:dword
+local numnodes:dword
+local cConn:dword
+
+	mov afgnode,0
 
 	mov ebx, pHDA
 
@@ -381,8 +412,8 @@ local rmcs:RMCS
 ;--- its aligned to 1 kB, but to be save,
 ;--- ensure that the RIRB is 2kB-aligned.
 
-	mov edi, dwXMSPhys
-	mov eax, pXMSLin
+	mov edi, dwPhysBlk
+	mov eax, pLinBlk
 	.if ax & 400h
 		mov dword ptr [ebx].HDAREGS.corbbase+0, edi
 		mov dword ptr [ebx].HDAREGS.corbbase+4, 0
@@ -436,6 +467,11 @@ local rmcs:RMCS
 @@:
 	call dowait
 	test [ebx].HDAREGS.corbctl,2
+	loopz @B
+	mov ecx,1000h
+@@:
+	call dowait
+	test [ebx].HDAREGS.rirbctl,2
 	loopz @B
 
 	.if bVerbose
@@ -717,21 +753,6 @@ exit:
 	test [ebx].HDAREGS.rirbctl,2
 	loopnz @B
 
-	mov ax,xmshdl
-	.if ax
-		mov rmcs.rDX,ax
-		mov rmcs.rAX,0D00h	;unlock XMS block
-		lea edi,rmcs
-		mov bx,0
-		mov cx,0
-		mov ax,0301h
-		int 31h
-		mov rmcs.rAX,0A00h	;free XMS block
-		mov bx,0
-		mov cx,0
-		mov ax,0301h
-		int 31h
-	.endif
 	ret
 timeout:
 	invoke printf, CStr(lf,"timeout waiting for codec response",lf)
@@ -1038,25 +1059,7 @@ main proc c argc:dword,argv:dword
 
 local dwClass:dword
 local pszType:dword
-
-;--- allocate 2 uncommitted regions;
-;--- will be used to map HDA controller and CORB/RIRB
-	xor ebx,ebx
-	mov ecx,2000h
-	xor edx,edx
-	mov ax,504h
-	int 31h
-	jc @F
-	mov pMemRg1,ebx
-@@:
-	xor ebx,ebx
-	mov ecx,2000h
-	xor edx,edx
-	mov ax,504h
-	int 31h
-	jc @F
-	mov pMemRg2,ebx
-@@:
+local pMemRg2:dword
 
 	mov esi, argc
 	mov ebx,argv
@@ -1081,12 +1084,44 @@ local pszType:dword
 		dec esi
 		add ebx,4
 	.endw
+
+;--- allocate real-mode stack of 4kB
+
 	mov ax,100h
 	mov bx,40h
 	int 31h
 	jc exit
 	mov word ptr rmstack+0,400h
 	mov word ptr rmstack+2,ax
+
+;--- allocate 2 uncommitted regions;
+;--- will be used to map HDA controller and CORB/RIRB
+	mov pMemRg2,0
+	xor ebx,ebx
+	mov ecx,2000h
+	xor edx,edx
+	mov ax,504h
+	int 31h
+	jc @F
+	mov pMemRg1,ebx
+@@:
+	xor ebx,ebx
+	mov ecx,2000h
+	xor edx,edx
+	mov ax,504h
+	int 31h
+	jc @F
+	mov pMemRg2,ebx
+@@:
+	invoke AllocXMS, 3	;alloc 3 kB physical memory for CORB/RIRB
+	jc exit
+	mov dwPhysBlk,eax
+
+;--- map the block into linear memory so it can be accessed
+
+	invoke mapphys, pMemRg2, eax, 1024 * 3
+	jc exit
+	mov pLinBlk, eax
 
 	xor edi,edi
 	mov ax,0B101h
@@ -1119,10 +1154,12 @@ usage:
 	invoke printf, CStr(" -r : reset controller",lf)
 	invoke printf, CStr(" -v : display more details",lf)
 exit:
+	call FreeXMS
 	ret
 error1:
 	invoke printf, CStr("no PCI BIOS implemented",lf)
-	ret
+	jmp exit
+
 main endp
 
 	include setargv.inc

@@ -16,6 +16,7 @@
 ?CHANNEL  equ 0	;channel start # to use
 ?DISPCR   equ 1	;1 display corb/rirp status
 ?SHELL    equ 1	;1 launch a shell, 0 wait for ESC key
+?INTCNT   equ 128;value for RIRB response interrupt count register
 
 lf	equ 10
 
@@ -907,7 +908,7 @@ endif
 
 	mov [ebx].HDAREGS.corbwp,0		;reset CORB WP
 	mov [ebx].HDAREGS.rirbwp,8000h	;reset RIRB WP
-	mov [ebx].HDAREGS.rirbric,1		;interrupt after 1 response
+	mov [ebx].HDAREGS.rirbric,?INTCNT	;interrupt after x responses
 
 ;--- to reset the CORB RP, first set bit 15 to 1, then back to 0
 ;--- seems not to work on many? machines, so do with timeout.
@@ -995,14 +996,20 @@ endif
 	shl edi,5	;*32 (=sizeof STREAM)
 	lea edi,[ebx+edi+HDAREGS.stream0]
 
+;--- reset stream
+
+	mov ecx,1000h
 	or [edi].STREAM.wCtl, 1
-	.while !([edi].STREAM.wCtl & 1)
-		call dowait
-	.endw
+@@:
+	call dowait
+	test [edi].STREAM.wCtl,1
+	loopz @B
+	mov ecx,1000h
 	and [edi].STREAM.wCtl, not 1
-	.while [edi].STREAM.wCtl & 1
-		call dowait
-	.endw
+@@:
+	call dowait
+	test [edi].STREAM.wCtl,1
+	loopnz @B
 
 ;--- init stream[x] in HDA controller memory
 
@@ -1019,6 +1026,9 @@ endif
 	add edx, 256*(4+8)	;calculate BDL physical address
 	mov dword ptr [edi].STREAM.qwBuffer+0, edx
 	mov dword ptr [edi].STREAM.qwBuffer+4, 0
+	.if bVerbose
+		invoke printf, CStr("stream descriptor initialized",lf)
+	.endif
 
 ;--- the HDA is ready to start the DMA process
 ;--- map memory for samples in address space, read samples, and unmap buffer 
