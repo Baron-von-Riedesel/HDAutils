@@ -28,6 +28,9 @@ STREAM ends
 
 ;--- structure of HDA controller memory-mapped registers
 
+;gcap: 12-15:output streams (max 15); 8-11:input streams (max 15); 3-7:bidir streams; 
+;      1-2: number of serial data out signals; 0: 64-bit addr supported
+
 HDAREGS struct 8
 gcap     dw ?
 vminor   db ?
@@ -36,7 +39,7 @@ opayload dw ?
 ipayload dw ?
 gctl     dd ?
 wakeen   dw ?
-statests dw ?
+statests dw ?	;+0Eh also named WAKESTS in specs
 gsts     dd ?	;+10h
          dd ?,?,?
 intctl   dd ?	;+20h

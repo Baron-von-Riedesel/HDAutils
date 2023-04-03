@@ -309,6 +309,8 @@ local pinnode:word
 	jz exit
 	mov afgnode,si
 
+	invoke sendcmd, ebx, codec, afgnode, 0705h, 0	;set power state
+
 ;--- get start of afg widgets
 
 	invoke sendcmd, ebx, codec, si, 0F00h, 4
@@ -375,7 +377,7 @@ pinnode_found:
 	cmp pinnode,0
 	jz exit
 
-	invoke sendcmd, ebx, codec, afgnode, 0705h, 0	;set power state
+;	invoke sendcmd, ebx, codec, afgnode, 0705h, 0	;set power state
 	.if bReset
 		invoke sendcmd, ebx, codec, afgnode, 7ffh, 0	;reset afg
 	.endif
@@ -443,7 +445,15 @@ bittab db 8,16,20,24,32,-1,-1,-1
 
 format2rbc endp
 
-;--- translate rate (ecx), bits (dx), channels (bx) to format in eax
+;--- translate rate (ecx), bits (dx), channels (bx) to format in ax
+;--- returned format:
+;--- bits 0-3: channels - 1
+;--- bits 4-6: bits/sample (0=8,1=16,2=20,3=24,4=32)
+;--- bit 7: reserved
+;--- bits 8-10: divisor
+;--- bits 11-13: multiple
+;--- bit 14: base (0=48000,1=44100)
+;--- bit 15: 0=PCM
 
 rbc2format proc uses esi
 
@@ -473,16 +483,16 @@ found2:
 
 B441 equ 4000h
 B480 equ 0
-MUL4 equ 011b shl 11
-MUL3 equ 010b shl 11
-MUL2 equ 001b shl 11
+MUL4 equ (011b shl 11)
+MUL3 equ (010b shl 11)
+MUL2 equ (001b shl 11)
 MUL1 equ 0
-DIV2 equ 001b shl 8
-DIV3 equ 010b shl 8
-DIV4 equ 011b shl 8
-DIV5 equ 100b shl 8
-DIV6 equ 101b shl 8
-DIV8 equ 111b shl 8
+DIV2 equ (001b shl 8)
+DIV3 equ (010b shl 8)
+DIV4 equ (011b shl 8)
+DIV5 equ (100b shl 8)
+DIV6 equ (101b shl 8)
+DIV8 equ (111b shl 8)
 
 rates dd 176400,88200,44100,22050,11025
       dd 192000,144000,96000,48000,32000,24000,16000,9600,8000,6000
@@ -692,14 +702,15 @@ local rmcs:RMCS
 	.endif
 
 ;--- translate format of file into wFormat for HDA
-	mov wFormat,0
 	mov ecx, wavefmt.nSamplesPerSec
 	mov dx, wavefmt.wBitsPerSample
 	mov bx, wavefmt.nChannels
 	call rbc2format
-	jc @F
+	.if CARRY?
+		invoke printf, CStr("format not supported",lf)
+		jmp exit
+	.endif
 	mov wFormat, ax
-@@:
 
 ;--- XMS memory is to be allocated, since physical addresses are needed.
 ;--- first find XMM entry point.
@@ -962,6 +973,7 @@ endif
 	.if (ecx == 0)
 		invoke searchaopath, ebx, currdevice, esi, wFormat
 	.else
+		;--- todo: explain what's done here!
 		.while ecx
 			.if ecx & 1
 				push ecx
@@ -1255,7 +1267,7 @@ local pszFN:dword
 exit:
 	ret
 usage:
-	invoke printf, CStr("hdaplay v1.0",lf)
+	invoke printf, CStr("hdaplay v1.1",lf)
 	invoke printf, CStr("play PCM file (.wav) with HD Audio",lf)
 	invoke printf, CStr("usage: hdaplay [ options ] filename",lf)
 	invoke printf, CStr("options:",lf)

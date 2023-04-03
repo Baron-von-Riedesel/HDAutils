@@ -52,6 +52,7 @@ xmshdl  dw 0
 bVerbose db 0
 bReset db 0
 bActiveOnly db 0
+bNoCodecs db 0
 
 	align 4
 widgettypes label dword
@@ -866,13 +867,17 @@ local bistreams:dword
 	mov esi,0
 	movzx ecx, [ebx].HDAREGS.statests
 	.if !ecx
-		invoke dispcodec, ebx, esi
+		.if !bNoCodecs
+			invoke dispcodec, ebx, esi
+		.endif
 		jmp exit
 	.endif
 	.while ecx
 		.if ecx & 1
 			push ecx
-			invoke dispcodec, ebx, esi
+			.if !bNoCodecs
+				invoke dispcodec, ebx, esi
+			.endif
 			pop ecx
 		.endif
 		shr ecx,1
@@ -1071,6 +1076,8 @@ local pMemRg2:dword
 			or ah,20h
 			.if ah == 'a'
 				mov bActiveOnly, 1
+			.elseif ah == 'n'
+				mov bNoCodecs, 1
 			.elseif ah == 'r'
 				mov bReset, 1
 			.elseif ah == 'v'
@@ -1151,6 +1158,7 @@ usage:
 	invoke printf, CStr("usage: hdastat [ options ]",lf)
 	invoke printf, CStr("options:",lf)
 	invoke printf, CStr(" -a : display active streams only",lf)
+	invoke printf, CStr(" -n : don't display codecs",lf)
 	invoke printf, CStr(" -r : reset controller",lf)
 	invoke printf, CStr(" -v : display more details",lf)
 exit:
