@@ -1,7 +1,7 @@
 
-;--- play a PCM file using HD Audio.
-;--- the sound will be emitted to the "rear panel" lineout pin.
-;--- after the HDA controller's dma engine has been started,
+;--- Play a PCM file using HD Audio.
+;--- The sound will be emitted to the "rear panel" lineout pin.
+;--- After the HDA controller's dma engine has been started,
 ;--- a command processor ("C:\command.com") is launched. Exiting
 ;--- this program will also exit hdaplay.exe.
 
@@ -229,6 +229,7 @@ sendcmd endp
 
 ;--- check connections of a widget, recursively,
 ;--- until an "audio output converter" is found
+;--- out: PIN in EAX
 
 checkconn proc uses esi edi codec:dword, node:word, wtype:word
 
@@ -274,6 +275,40 @@ local currConn:dword
 	ret
 
 checkconn endp
+
+;--- display bit depths and sample rates supported by codec
+
+	.const
+samplerates	dd 8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000,
+	176400, 192000, 384000, 0
+bitdepths db 8, 16, 20, 24, 32, 0
+	.code
+
+dispsuppcaps proc uses esi ebx codec:dword, caps:dword
+	mov ebx, caps
+	invoke printf, CStr("codec %u, supported sample rates:"), codec
+	mov esi, offset samplerates
+	.while dword ptr [esi]
+		lodsd
+		.if ebx & 1
+			invoke printf, CStr(" %u"), eax
+		.endif
+		shr ebx, 1
+	.endw
+	invoke printf, CStr(lf)
+	shr ebx, 4
+	invoke printf, CStr("codec %u, supported bit depths:"), codec
+	mov esi, offset bitdepths
+	.while byte ptr [esi]
+		lodsb
+		.if ebx & 1
+			invoke printf, CStr(" %u"), eax
+		.endif
+		shr ebx, 1
+	.endw
+	invoke printf, CStr(lf)
+	ret
+dispsuppcaps endp
 
 ;--- get "lineout", "speaker" or "headphone" pin widget
 ;--- and search a path to corresponding "audio output" widget
@@ -390,7 +425,15 @@ pinnode_found:
 		.if !bQuiet
 			invoke printf, CStr("codec %u, audio converter widget used: %u",lf), codec, si
 		.endif
+
 		invoke sendcmd, ebx, codec, si, 0002h, wFormat;set converter format
+
+;--- display supported bit depths and sample rates
+		.if !bQuiet
+			invoke sendcmd, ebx, codec, afgnode, 0F00h, 10
+			invoke dispsuppcaps, codec, eax
+		.endif
+
 		;--- set stream & start channel - stream is in [7:4], start channel in [3:0]
 		invoke sendcmd, ebx, codec, si, 0706h, ?STREAM shl 4 or ?CHANNEL
 	.else
@@ -483,10 +526,10 @@ found2:
 
 B441 equ 4000h
 B480 equ 0
-MUL4 equ (011b shl 11)
-MUL3 equ (010b shl 11)
-MUL2 equ (001b shl 11)
 MUL1 equ 0
+MUL2 equ (001b shl 11)
+MUL3 equ (010b shl 11)
+MUL4 equ (011b shl 11)
 DIV2 equ (001b shl 8)
 DIV3 equ (010b shl 8)
 DIV4 equ (011b shl 8)
@@ -973,7 +1016,7 @@ endif
 	.if (ecx == 0)
 		invoke searchaopath, ebx, currdevice, esi, wFormat
 	.else
-		;--- todo: explain what's done here!
+		;--- multiple codecs, scan them until a valid pin has been found
 		.while ecx
 			.if ecx & 1
 				push ecx

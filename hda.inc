@@ -43,9 +43,8 @@ statests dw ?	;+0Eh also named WAKESTS in specs
 gsts     dd ?	;+10h
          dd ?,?,?
 intctl   dd ?	;+20h
-         dd ?
-intsts   dd ?
-         dd ?
+intsts   dd ?	;+24h
+         dd ?,?
 walclk   dd ?	;+30h
          dd ?
 ssync    dd ?
@@ -145,4 +144,8 @@ DEFDEV_LINEOUT equ 0
 DEFDEV_SPEAKER equ 1
 DEFDEV_HEADPHONE equ 2
 
+;--- supported PCM rates ( bits 8-15 )
+;--- bits 8-10: div 1,2,3,4,5,6,8
+;--- bits 11-13: mul 1,2,3,4
+;--- bits 14: base, 0=48kHz, 1=44.1 kHz
 
