@@ -1,0 +1,12 @@
+
+  03/2024: v1.2
+   - translate PCI capabilities; display if MSI is enabled.
+   - more detailed output with -v
+   - option -h added to route output to headphone
+  
+  01/2024: v1.1
+   - hdaplay: display bit depths and sample rates supported by codec.
+   - ensured afg power state is enabled.
+
+  12/2021: v1.0
+   - initial

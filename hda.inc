@@ -30,6 +30,10 @@ STREAM ends
 
 ;gcap: 12-15:output streams (max 15); 8-11:input streams (max 15); 3-7:bidir streams; 
 ;      1-2: number of serial data out signals; 0: 64-bit addr supported
+;intctl/intsts:
+;      31: GIE/GIS global interrupt enable
+;      30: CIE/CIS controller interrupt enable
+;      0-29: SIE/SIS stream interrupt enable (input, output, bidirectional)
 
 HDAREGS struct 8
 gcap     dw ?
@@ -38,7 +42,7 @@ vmajor   db ?
 opayload dw ?
 ipayload dw ?
 gctl     dd ?
-wakeen   dw ?
+wakeen   dw ?	;+0Ch same bits as statests
 statests dw ?	;+0Eh also named WAKESTS in specs
 gsts     dd ?	;+10h
          dd ?,?,?
@@ -50,17 +54,17 @@ walclk   dd ?	;+30h
 ssync    dd ?
          dd ?
 corbbase dq ?	;+40h size of CORB 256*4 = 1024
-corbwp   dw ? 
-corbrp   dw ? 
-corbctl  db ?
+corbwp   dw ?	;+48h RW, size of ptr is  a byte only, bits 8-15 are reserved 
+corbrp   dw ?	;+4Ah RW, size of ptr is  a byte only, bit 15=1 to reset
+corbctl  db ?	;+4Ch
 corbsts  db ? 
 corbsize db ?	;2, 16 or 256 entries (bits 1:0)
          db ?
 rirbbase dq ?	;+50h size of RIRB 256*8 = 2048
-rirbwp   dw ? 
-rirbric  dw ? 
-rirbctl  db ?
-rirbsts  db ?
+rirbwp   dw ?	;+58h
+rirbric  dw ?	;+5Ah
+rirbctl  db ?	;+5Ch
+rirbsts  db ?	; bit 0; write 1 to clear
 rirbsize db ?
          db ?
 ic       dd ?	;+60h immediate command register
@@ -118,7 +122,7 @@ BDLENTRY ends
 ;--- bit 6-0: gain
 ;
 ;--- default configuration (F1C)
-;--- 31:30 port connectivity
+;--- 31:30 port connectivity (01=not connected)
 ;--- 29:24 location
 ;--- 23:20 default device
 ;--- 19:16 connection type

@@ -9,8 +9,8 @@
 
    Loads a PCM-coded file ( RIFF format, filenames usually having a .wav 
   extension ) into memory, searches a path to the lineout pin, then starts
-  the HDA DMA engine to play and launches a shell. Exiting the shell will
-  terminate the play and release all resources.
+  the HDA DMA engine to play and finally launches a shell. Exiting the shell
+  will terminate the audio and release all resources.
 
    Hints
 
@@ -21,11 +21,7 @@
      the HDA controller's DMA engine.
    - HDAplay won't do any format conversions. If the codec attached to the HDA
      controller doesn't support the format of the audio data supplied, then
-     the output will be "strange".
-
-  3. History
-
-  - 27.1.2024, hdaplay: display bit depths and sample rates supported by codec.
+     the output may sound "strange".
 
   For license see file license.txt
   
