@@ -30,6 +30,20 @@ sym db text,0
 	exitm <offset sym>
 endm
 
+DStr macro text:vararg	;define a string in .data
+local sym
+	.const
+sym db text,0
+	.data
+	exitm <offset sym>
+endm
+
+@DefStr macro xx:vararg	;define multiple strings in .data
+	for x,<xx>
+	dd DStr(x)
+	endm
+endm
+
 	include dpmi.inc
 	include hda.inc
 
@@ -62,10 +76,9 @@ pRirb   dd ?	;linear address RIRB
 pMemRg1 dd 0
 pMemRg2 dd 0
 
-;--- wWidget, wCodec and wDevice must be consecutive!
 wWidget dw 0	;-w option
-wCodec  dw 0
-wDevice dw 0
+wCodec  dw 0	;-c option
+wDevice dw 0	;-d option
 
 bQuiet  db 0	;-q option
 bReset  db 0	;-r option
@@ -76,6 +89,10 @@ if ?SHELL
 fcb		db 0, "           ", 0, 0, 0, 0
 cmdl	db 0,13
 endif
+
+widgettypes label dword
+	@DefStr "audio output", "audio input", "audio mixer", "audio selector"
+	@DefStr "pin complex", "power widget", "volume knob", "beep generator"
 
 	.CODE
 
@@ -204,7 +221,7 @@ if ?LOGCODEC
 @@:
 	mov ax,[ebx].HDAREGS.corbrp
 	cmp ax,dx
-	loopnz @B
+	loopnz @B		; wait till cmd has been sent
 	pop eax
 	.if ecx
 		invoke printf, CStr("sendcmd: cmd %X send, waiting for response, rirbwp=%X",lf), eax, si
@@ -212,6 +229,9 @@ if ?LOGCODEC
 		invoke printf, CStr("sendcmd: timeout waiting for cmd %X to be sent",lf), eax
 	.endif
 endif
+
+;--- we don't check rirbsts, just check if rirbwp has changed
+
 	.while si == [ebx].HDAREGS.rirbwp
 		call dowait
 	.endw
@@ -251,8 +271,14 @@ local currConn:dword
 		shld ecx, eax, 12
 		and ecx,0fh
 		.if ecx == WTYPE_AUDIOOUT	;audio output converter found?
+			push ecx
 			invoke sendcmd, ebx, codec, si, 0705h, 0	;set power state
 			invoke sendcmd, ebx, codec, si, 0003h, 0B040h;set amplifier
+			pop ecx
+			.if bVerbose
+				mov ecx, [ecx*4][widgettypes]
+				invoke printf, CStr("codec %u, widget %u (%s), power state & amplifier set",lf), codec, esi, ecx
+			.endif
 			.break
 		.endif
 		invoke checkconn, codec, si, cx
@@ -270,6 +296,13 @@ local currConn:dword
 		.endif
 		invoke sendcmd, ebx, codec, node, 0705h, 0	;set power state
 		invoke sendcmd, ebx, codec, node, 0003h, 0F040h;set amplifier
+		.if bVerbose
+			invoke sendcmd, ebx, codec, node, 0F00h, 9	;get widgettype
+			shld ecx, eax, 12
+			and ecx,0fh
+			mov ecx, [ecx*4][widgettypes]
+			invoke printf, CStr("codec %u, widget %u (%s), power state & amplifier set",lf), codec, node, ecx
+		.endif
 		mov eax, esi
 	.endif
 	ret
@@ -279,14 +312,15 @@ checkconn endp
 ;--- display bit depths and sample rates supported by codec
 
 	.const
-samplerates	dd 8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000,
+samplerates dd 8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000,
 	176400, 192000, 384000, 0
 bitdepths db 8, 16, 20, 24, 32, 0
 	.code
 
 dispsuppcaps proc uses esi ebx codec:dword, caps:dword
-	mov ebx, caps
+
 	invoke printf, CStr("codec %u, supported sample rates:"), codec
+	mov ebx, caps
 	mov esi, offset samplerates
 	.while dword ptr [esi]
 		lodsd
@@ -296,8 +330,10 @@ dispsuppcaps proc uses esi ebx codec:dword, caps:dword
 		shr ebx, 1
 	.endw
 	invoke printf, CStr(lf)
-	shr ebx, 4
+
 	invoke printf, CStr("codec %u, supported bit depths:"), codec
+	mov ebx, caps
+	shr ebx, 16
 	mov esi, offset bitdepths
 	.while byte ptr [esi]
 		lodsb
@@ -308,6 +344,7 @@ dispsuppcaps proc uses esi ebx codec:dword, caps:dword
 	.endw
 	invoke printf, CStr(lf)
 	ret
+
 dispsuppcaps endp
 
 ;--- get "lineout", "speaker" or "headphone" pin widget
@@ -317,6 +354,8 @@ searchaopath proc uses ebx esi edi pHDA:ptr HDAREGS, device:dword, codec:dword, 
 
 local startnode:dword
 local numnodes:dword
+local defcfg:dword
+local widgetcaps:dword
 local afgnode:word
 local pinnode:word
 
@@ -360,10 +399,8 @@ local pinnode:word
 ;--- pin set with -w option?
 	mov ax,wWidget
 	.if ax
-		mov ecx,device
-		mov edx,codec
 		add edi, esi
-		.if cx != wDevice || dx != wCodec || ax < si || ax > di
+		.if ax < si || ax > di
 			jmp exit
 		.endif
 		invoke sendcmd, ebx, codec, ax, 0F00h, 9	;get widgettype of -w option parameter
@@ -382,22 +419,31 @@ local pinnode:word
 
 	.while edi
 		invoke sendcmd, ebx, codec, si, 0F00h, 9	;get widgettype
-		shld ecx, eax, 12
+		shld ecx, eax, 12 ; widget type is in bits 20-23
 		and ecx,0fh
+		mov widgetcaps, eax
 		.if cl == WTYPE_PIN
 			invoke sendcmd, ebx, codec, si, 0F1Ch, 0	;get default config
+			mov defcfg, eax
 			shld ecx,eax,12
 			and ecx,0Fh
 			mov edx,eax
 			shr edx,12
 			and edx,0fh
 			.if cl == bDefDev
-				;--- if more than one lineout exist, prefer the one with color green (=4)!
-				.if pinnode == 0 || ( cl == DEFDEV_LINEOUT && edx == 4 )
-					mov pinnode, si
-					.if !bQuiet
+				bt widgetcaps, 9
+				; digital?
+				.if CARRY?
+					.if bVerbose
 						mov ecx,[ecx*4+offset defdevices]
-						invoke printf, CStr("codec %u, %s pin widget: %u",lf), codec, ecx, esi
+						invoke printf, CStr("codec %u, %s pin widget: %u is digital (caps=%X), ignored",lf), codec, ecx, esi, widgetcaps
+					.endif
+				;--- if more than one lineout exist, prefer the one with color green (=4)!
+				.elseif pinnode == 0 || ( cl == DEFDEV_LINEOUT && edx == 4 )
+					mov pinnode, si
+					.if bVerbose
+						mov ecx,[ecx*4+offset defdevices]
+						invoke printf, CStr("codec %u, %s pin widget: %u (default config=%X)",lf), codec, ecx, esi, defcfg
 					.endif
 				.endif
 			.endif
@@ -425,6 +471,7 @@ pinnode_found:
 		.if !bQuiet
 			invoke printf, CStr("codec %u, audio converter widget used: %u",lf), codec, si
 		.endif
+		; check amplifier data
 
 		invoke sendcmd, ebx, codec, si, 0002h, wFormat;set converter format
 
@@ -883,16 +930,22 @@ local rmcs:RMCS
 ;--- expect to find more than one HDA controller - HDMI 
 ;--- video output may have it's own controller/codec.
 
-	mov currdevice,0
+	movzx eax, wDevice	; use the index set with -d as start (default 0)
+	mov currdevice, eax
 nextdevice:
 	mov esi,currdevice
 	mov ecx,040300h	;search for HD Audio device(s)
 	mov ax,0B103h
 	call int_1a
 	.if ah != 0
-		.if currdevice == 0
-			invoke printf, CStr("no HDA device found",lf)
-		.elseif bQuiet
+		movzx eax, wDevice
+		.if eax == currdevice
+			.if eax 
+				invoke printf, CStr("no HDA device #%u found",lf), eax
+			.else
+				invoke printf, CStr("no HDA device found",lf)
+			.endif
+		.elseif !bQuiet
 			movzx ecx,bDefDev
 			mov ecx,[ecx*4+offset defdevices]
 			invoke printf, CStr("no HDA device with %s pin found",lf), ecx
@@ -1013,12 +1066,13 @@ endif
 
 	mov esi,0
 	movzx ecx, [ebx].HDAREGS.statests
-	.if (ecx == 0)
+	.if ( ecx == 0 && wCodec == 0 )
 		invoke searchaopath, ebx, currdevice, esi, wFormat
 	.else
+		xor eax, eax
 		;--- multiple codecs, scan them until a valid pin has been found
 		.while ecx
-			.if ecx & 1
+			.if ( ecx & 1 ) && ( si >= wCodec )
 				push ecx
 				invoke searchaopath, ebx, currdevice, esi, wFormat
 				pop ecx
@@ -1032,7 +1086,13 @@ endif
 		.if !bQuiet
 			movzx ecx,bDefDev
 			mov ecx,[ecx*4+offset defdevices]
-			invoke printf, CStr("no %s pin found for this device",lf), ecx
+			.if wCodec || wDevice
+				movzx edx, wCodec
+				movzx eax, wDevice
+				invoke printf, CStr("no %s pin found for device %u, codec %u",lf), ecx, eax, edx
+			.else
+				invoke printf, CStr("no %s pin found for this device",lf), ecx
+			.endif
 		.endif
 		;--- stop CORB and RIRB DMA engines
 		call stopcr
@@ -1082,7 +1142,11 @@ endif
 	mov dword ptr [edi].STREAM.qwBuffer+0, edx
 	mov dword ptr [edi].STREAM.qwBuffer+4, 0
 	.if bVerbose
-		invoke printf, CStr("stream descriptor initialized",lf)
+		mov eax, edi
+		sub eax, ebx
+		sub eax, 80h
+		shr eax, 5		; eax = ( edi - ( ebx + 80h ) ) / 32 -> SD#
+		invoke printf, CStr("stream descriptor %u initialized",lf), eax
 	.endif
 
 ;--- the HDA is ready to start the DMA process
@@ -1106,7 +1170,7 @@ endif
 
 	or [edi].STREAM.wCtl, 2
 
-	.if !bQuiet
+	.if bVerbose
 		movzx eax,[ebx].HDAREGS.gcap
 		shr eax,8
 		and eax,0Fh
@@ -1197,12 +1261,14 @@ unmaphda:
 
 playwavewithHDA endp
 
-getwidget proc
+;--- get widget number
+
+getnumber proc
 	xor edx,edx
 nextnum:
 	xor ecx,ecx
 	mov al,[edi]
-	.while al && al != ','
+	.while al
 		sub al,'0'
 		jb error
 		cmp al,9
@@ -1213,20 +1279,13 @@ nextnum:
 		inc edi
 		mov al,[edi]
 	.endw
-	mov [edx*2+offset wWidget],cx
-	.if al == ','
-		cmp edx,2
-		jae error
-		inc edx
-		inc edi
-		jmp nextnum
-	.endif
+	mov eax, ecx
 	clc
 	ret
 error:
 	stc
 	ret
-getwidget endp
+getnumber endp
 
 ;--- find a path to lineout/speaker/headphone and stream a .wav file
 
@@ -1250,13 +1309,26 @@ local pszFN:dword
 			.elseif ah == 'r'
 				or bReset, 1
 			.elseif ah == 's'
-				or bDefDev, DEFDEV_SPEAKER
+				mov bDefDev, DEFDEV_SPEAKER
+			.elseif ah == 'h'
+				mov bDefDev, DEFDEV_HEADPHONE
 			.elseif ah == 'v'
 				or bVerbose, 1
 			.elseif ah == 'w'
 				add edi,2
-				call getwidget
+				call getnumber
 				jc usage
+				mov wWidget, ax
+			.elseif ah == 'd'
+				add edi,2
+				call getnumber
+				jc usage
+				mov wDevice, ax
+			.elseif ah == 'c'
+				add edi,2
+				call getnumber
+				jc usage
+				mov wCodec, ax
 			.else
 				jmp usage
 			.endif
@@ -1310,15 +1382,18 @@ local pszFN:dword
 exit:
 	ret
 usage:
-	invoke printf, CStr("hdaplay v1.1",lf)
+	invoke printf, CStr("hdaplay v1.2",lf)
 	invoke printf, CStr("play PCM file (.wav) with HD Audio",lf)
 	invoke printf, CStr("usage: hdaplay [ options ] filename",lf)
 	invoke printf, CStr("options:",lf)
+	invoke printf, CStr("  -c<idx> : select codec index to start scan (default 0)",lf)
+	invoke printf, CStr("  -d<idx> : select device index to start scan (default 0)",lf)
+	invoke printf, CStr("  -h : use headphone instead of lineout widget",lf)
 	invoke printf, CStr("  -q : quiet (means: no displays)",lf)
 	invoke printf, CStr("  -r : reset Audio Function Group",lf)
 	invoke printf, CStr("  -s : use speaker instead of lineout widget",lf)
 	invoke printf, CStr("  -v : more displays",lf)
-	invoke printf, CStr("  -w<p[,c,d]>: set pin widget, p=pin, c=codec, d=device",lf)
+	invoke printf, CStr("  -w<pin>: set pin widget number for output",lf)
 	ret
 error1:
 	invoke printf, CStr("no PCI BIOS implemented",lf)

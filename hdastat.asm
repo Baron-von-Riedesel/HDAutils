@@ -9,6 +9,7 @@
 ?LOGCODEC equ 0
 ?SENDNULL equ 0
 ?HDCTL    equ 0	;display PCI register 0x40 (Intel ICH, bit 0: 0=AC97, 1=HDA)
+?TCSEL    equ 0	;display PCI register 0x44 (bits 0-2 to select TC0-TC7)
 
 lf	equ 10
 
@@ -82,6 +83,29 @@ colors label dword
 	@DefStr "green", "red", "orange", "yellow"
 	@DefStr "purple", "pink", "rsvd:0a", "rsvd:0b"
 	@DefStr "rsvd:0c", "rsvd:0d", "white", "other"
+
+capstrgs label dword
+	dd 0
+	dd DStr("Power Management")
+	dd DStr("AGP controller")
+	dd DStr("vital product data")
+	dd DStr("slot identification")
+	dd DStr("MSI")
+	dd DStr("CompactPCI hot swap")
+	dd DStr("PCI-X")
+	dd DStr("HyperTransport")
+	dd DStr("Vendor Specific")
+	dd DStr("Debug port")
+	dd DStr("CompactPCI central resource control")
+	dd DStr("Hot Plug")
+	dd DStr("bridge subsystem")
+	dd DStr("AGP 8x")
+	dd DStr("Secure Device")
+	dd DStr("PCIe")
+	dd DStr("MSI-X")
+	dd DStr("SATA Data/Index Configuration")
+	dd DStr("Advanced Features")
+NUMCAPSTR equ ($ - offset capstrgs) / 4
 
 	.const
 
@@ -923,8 +947,11 @@ local dwPhysBase:dword
 	mov ax,0B10Ah
 	call int_1a
 	jc exit
+	mov eax, ecx
 	and cl,0F0h
 	mov dwPhysBase, ecx
+	test al, 4		; 64-bit address?
+	jz @F
 	mov edi, 5*4
 	mov ebx,dwPath
 	mov ax,0B10Ah
@@ -935,6 +962,7 @@ local dwPhysBase:dword
 		invoke printf, CStr("  HDA Base Address=0x%lX beyond 4 GB limit, can't be accessed.",lf), ecx::eax
 		jmp exit
 	.endif
+@@:
 	invoke printf, CStr(lf,"  HDA Base Address=0x%X",lf), dwPhysBase
 	invoke mapphys, pMemRg1, dwPhysBase, 1000h
 	jc exit
@@ -993,15 +1021,27 @@ endif
 			movzx ecx,cl
 			mov edi,ecx
 			.repeat
-				mov ax,0B109h
+				mov ax,0B10Ah	; read config dword
 				call int_1a
 				.break .if ah != 0
+				push ecx
 				movzx eax,ch
 				movzx ecx,cl
 				mov edi, eax
-				invoke printf, CStr("  capabilities ID=0x%X, next pointer=0x%X",lf), ecx, eax
-				.break .if edi == 0
-			.until 0
+				.if ecx < NUMCAPSTR
+					mov eax, [ecx*4][capstrgs]
+				.else
+					mov eax, CStr("unknown")
+				.endif
+				invoke printf, CStr("  capabilities ID=0x%X (%s)",lf), ecx, eax
+				pop ecx
+				.if cl == 5		; MSI caps?
+					bt ecx, 16	; MSI enabled?
+					.if CARRY?
+						invoke printf, CStr("  MSI enabled",lf)
+					.endif
+				.endif
+			.until edi == 0
 		.endif
 	.endif
 
@@ -1014,10 +1054,21 @@ endif
 	.endif
 if ?HDCTL
 	mov edi,40h
-	mov ax,0B10Ah
+	mov ax,0B108h
 	call int_1a
 	.if ah == 0
+		movzx ecx, cl
 		invoke printf, CStr("  HDCTL - register 40h=0x%X",lf), ecx
+	.endif
+endif
+if ?TCSEL
+;--- bits 0-2 used only, to select TC0-TC7
+	mov edi,44h
+	mov ax,0B108h
+	call int_1a
+	.if ah == 0
+		movzx ecx, cl
+		invoke printf, CStr("  TCSEL - register 44h=0x%X",lf), ecx
 	.endif
 endif
 	.if dwClass == 040300h
